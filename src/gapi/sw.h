@@ -57,6 +57,7 @@ namespace GAPI {
     Tile8   *curTile;
 #ifdef OL_MAGGIE
     bool    magColored;                  // current mesh range is flat-coloured (u = palette index)
+    bool    magAffine;                   // current polygon walks plain u, v (see magPrepare)
 #endif
 
     uint8 ambient;
@@ -387,14 +388,18 @@ namespace GAPI {
     }
 
     inline void step(VertexSW &v, const VertexSW &d) {
-        //v.w += d.w;
+    #ifdef OL_MAGGIE
+        v.w += d.w;                      // 1/w for the perspective divide
+    #endif
         v.u += d.u;
         v.v += d.v;
         v.l += d.l;
     }
 
     inline void step(VertexSW &v, const VertexSW &d, int32 count) {
-        //v.w += d.w * count;
+    #ifdef OL_MAGGIE
+        v.w += d.w * count;
+    #endif
         v.u += d.u * count;
         v.v += d.v * count;
         v.l += d.l * count;
@@ -409,14 +414,36 @@ namespace GAPI {
     void drawLine(const VertexSW &L, const VertexSW &R, int32 y) {
     #ifdef OL_MAGGIE
         {
-            int32 x1 = L.x >> 16;
+            int32 xa = L.x >> 16;
+            int32 x1 = xa;
             int32 x2 = R.x >> 16;
             int32 f = x2 - x1;
             if (f <= 0) return;
             float rf = f < 1024 ? Mag::rcp[f] : 1.0f / float(f);
-            int32 u  = L.u, v = L.v;
-            int32 du = int32(float(R.u - L.u) * rf);
-            int32 dv = int32(float(R.v - L.v) * rf);
+            if (magAffine) {             // plain u, v (magPrepare)
+                int32 u = L.u, v = L.v;
+                int32 du = int32(float(R.u - L.u) * rf), dv = int32(float(R.v - L.v) * rf);
+                int32 lL = Mag::shading ? Mag::rowToLight(L.l >> 3) : 0xFFFF;
+                int32 lR = Mag::shading ? Mag::rowToLight(R.l >> 3) : 0xFFFF;
+                int32 dl = int32(float(lR - lL) * rf);
+                int32 z  = L.z;
+                int32 dz = Mag::zOn ? int32(float(R.z - L.z) * rf) : 0;
+                if (x1 < swClipRect.x) {
+                    int32 k = swClipRect.x - x1;
+                    u += du * k; v += dv * k; lL += dl * k; z += dz * k;
+                    x1 = swClipRect.x;
+                }
+                if (x2 > swClipRect.z) x2 = swClipRect.z;
+                if (x2 <= x1) return;
+                if (magColored) Mag::bindFlat(L.u >> 16);
+                Mag::depthMode();
+                int32 offset = y * Core::width + x1;
+                Mag::span(swColor + offset, x2 - x1, u, v, du, dv, lL, dl, offset, uint32(z) << 1, dz << 1);
+                return;
+            }
+            // u/w, v/w, 1/w across the span (perspective form, see projectPush)
+            float qL = float(L.w), uqL = float(L.u), vqL = float(L.v);
+            float dq = (float(R.w) - qL) * rf, duq = (float(R.u) - uqL) * rf, dvq = (float(R.v) - vqL) * rf;
             int32 lL = Mag::shading ? Mag::rowToLight(L.l >> 3) : 0xFFFF;
             int32 lR = Mag::shading ? Mag::rowToLight(R.l >> 3) : 0xFFFF;
             int32 dl = int32(float(lR - lL) * rf);
@@ -424,15 +451,38 @@ namespace GAPI {
             int32 dz = Mag::zOn ? int32(float(R.z - L.z) * rf) : 0;
             if (x1 < swClipRect.x) {
                 int32 k = swClipRect.x - x1;
-                u += du * k; v += dv * k; lL += dl * k; z += dz * k;
+                lL += dl * k; z += dz * k;
                 x1 = swClipRect.x;
             }
             if (x2 > swClipRect.z) x2 = swClipRect.z;
             if (x2 <= x1) return;
-            if (magColored) Mag::bindFlat(L.u >> 16);
+            if (magColored) Mag::bindFlat(int32(uqL / max(qL, 1.0f) + 0.5f));   // U/Q = palette index
             Mag::depthMode();
             int32 offset = y * Core::width + x1;
-            Mag::span(swColor + offset, x2 - x1, u, v, du, dv, lL, dl, offset, uint32(z) << 1, dz << 1);
+            // pieces of at most MAG_PERSP_STEP pixels, affine inside; one piece when perspective is off
+            // or 1/w hardly changes along the span (then exact endpoints are as good)
+            float t = float(x1 - xa), te = float(x2 - xa);
+            float q0 = qL + dq * t, qe = qL + dq * te;
+            int32 step = 4096;
+            if (Mag::perspective) {
+                float qa = q0 < qe ? q0 : qe, qb = q0 < qe ? qe : q0;
+                if (qb > qa * MAG_PERSP_RATIO) step = MAG_PERSP_STEP;
+            }
+            float r0 = 65536.0f / q0;
+            float u0 = (uqL + duq * t) * r0, v0 = (vqL + dvq * t) * r0;
+            for (int32 xs = x1; xs < x2; ) {
+                int32 xe = min(xs + step, x2);
+                int32 n = xe - xs;
+                float tn = float(xe - xa);
+                float r1 = 65536.0f / (xe == x2 ? qe : qL + dq * tn);
+                float u1 = (uqL + duq * tn) * r1, v1 = (vqL + dvq * tn) * r1;
+                float rn = n < 1024 ? Mag::rcp[n] : 1.0f / float(n);
+                Mag::span(swColor + offset, n, int32(u0), int32(v0), int32((u1 - u0) * rn), int32((v1 - v0) * rn),
+                          lL, dl, offset, uint32(z) << 1, dz << 1);
+                lL += dl * n; z += dz * n; offset += n;
+                u0 = u1; v0 = v1;
+                xs = xe;
+            }
             return;
         }
     #endif
@@ -529,6 +579,29 @@ namespace GAPI {
         }
     }
 
+#ifdef OL_MAGGIE
+    // Only polygons whose 1/w varies noticeably get perspective-correct spans: their vertices are
+    // converted to u/w, v/w (two multiplies each); the rest walk plain u, v as before.
+
+    inline void magPrepare(VertexSW **v, VertexSW *tmp, int count) {
+        int32 qa = v[0]->w, qb = v[0]->w;
+        for (int i = 1; i < count; i++) {
+            if (v[i]->w < qa) qa = v[i]->w;
+            if (v[i]->w > qb) qb = v[i]->w;
+        }
+        magAffine = !Mag::perspective || float(qb) <= float(qa) * MAG_PERSP_RATIO;
+        if (magAffine) return;
+        // perspective form: U = u * 1024 / w = u * Q / 65536, interpolated linearly with Q
+        for (int i = 0; i < count; i++) {
+            tmp[i] = *v[i];
+            float q = float(v[i]->w) * (1.0f / 65536.0f);
+            tmp[i].u = int32(float(v[i]->u) * q);
+            tmp[i].v = int32(float(v[i]->v) * q);
+            v[i] = tmp + i;
+        }
+    }
+#endif
+
     void drawTriangle(Index *indices) {
     /*
              t
@@ -559,6 +632,11 @@ namespace GAPI {
         if (t->x > cx2 && m->x > cx2 && b->x > cx2)
             return;
 
+    #ifdef OL_MAGGIE
+        VertexSW magTmp[3], *magV[3] = { t, m, b };
+        magPrepare(magV, magTmp, 3);
+        t = magV[0]; m = magV[1]; b = magV[2];
+    #endif
         sortVertices(t, m, b);
 
         if (b->y < swClipRect.y || t->y > swClipRect.w)
@@ -608,6 +686,11 @@ namespace GAPI {
         if (t->x > cx2 && m->x > cx2 && o->x > cx2 && b->x > cx2)
             return;
 
+    #ifdef OL_MAGGIE
+        VertexSW magTmp[4], *magV[4] = { t, m, b, o };
+        magPrepare(magV, magTmp, 4);
+        t = magV[0]; m = magV[1]; b = magV[2]; o = magV[3];
+    #endif
         sortVertices(t, m, b, o);
 
         if (b->y < swClipRect.y || t->y > swClipRect.w)
@@ -680,9 +763,10 @@ namespace GAPI {
     };
 
     inline void projectPush(const vec4 &c, int32 u, int32 v, int32 l) {
-        float x = clamp(c.x / c.w, -16384.0f, 16384.0f);
-        float y = clamp(c.y / c.w, -16384.0f, 16384.0f);
-        float z = c.z / c.w;
+        float invw = 1.0f / c.w;
+        float x = clamp(c.x * invw, -16384.0f, 16384.0f);
+        float y = clamp(c.y * invw, -16384.0f, 16384.0f);
+        float z = c.z * invw;
         VertexSW r;
         r.x = int32(x) << 16;
         r.y = int32(y);
@@ -691,9 +775,16 @@ namespace GAPI {
     #else
         r.z = uint32(clamp(z, 0.0f, 1.0f) * 65535.0f) << 16;
     #endif
+    #ifdef OL_MAGGIE
+        // w holds Q = 2^26 / w (w >= 16) for perspective-correct texturing (see magPrepare)
+        r.w = int32(67108864.0f * (c.w > 16.0f ? invw : 1.0f / 16.0f));
+        r.u = u;
+        r.v = v;
+    #else
         r.w = int32(c.w) << 16;
         r.u = u;
         r.v = v;
+    #endif
         r.l = l;
         swIndices.push(swVertices.push(r));
     }

@@ -5,7 +5,7 @@
 # stats + frame times; compare with ./phdstats.py LEVEL) and NAME.png (last frame).
 set -eu
 H=$(cd "$(dirname "$0")" && pwd)
-R=$(cd "$H/../../.." && pwd)/emu-run
+R=${EMU_RUN:-$(cd "$H/../../.." && pwd)/emu-run}
 L=${1:-DATA/GYM.PHD}; N=${2:-20}; NAME=${3:-gym}
 BIN=${BIN:-OpenLara}
 cp "$H/$BIN" "$R/C/OpenLara"

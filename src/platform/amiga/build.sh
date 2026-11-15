@@ -23,6 +23,7 @@ mkdir -p $B
 [ -f $B/minimp3.o ]    || $CXX $FLAGS -std=c++11 -fno-exceptions -fno-rtti -c ../../libs/minimp3/minimp3.cpp -o $B/minimp3.o
 [ -f $B/tinflate.o ]   || $CC $FLAGS -c ../../libs/tinf/tinflate.c -o $B/tinflate.o
 $CXX $FLAGS -std=c++11 -fno-exceptions -fno-rtti -I../../ -Isdk-include -c main.cpp -o $B/main.o
-$CXX -m68060 -mhard-float $B/main.o $B/stb_vorbis.o $B/minimp3.o $B/tinflate.o -lm -o $OUT
+$CXX -m68060 -mhard-float -Wl,-Map=$B/map.txt $B/main.o $B/stb_vorbis.o $B/minimp3.o $B/tinflate.o -lm -o $OUT
+cp $OUT $B/$OUT.debug                  # unstripped, for crashaddr.py
 $TC/bin/m68k-amigaos-strip $OUT
 ls -l $OUT

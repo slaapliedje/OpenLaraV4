@@ -143,6 +143,9 @@ namespace Mag {
 
     // depth buffer: the software renderer has none (draw order only); Maggie tests and writes 16-bit
     // depth per pixel, smaller = nearer. Values are the engine's z/w * 65535, linear in screen space.
+    bool     perspective = true;         // F6 toggles: spans split into perspective-correct pieces
+    #define  MAG_PERSP_STEP 64           // pixels per affine piece
+    #define  MAG_PERSP_RATIO 1.3f        // 1/w varying less than this across a polygon/span: affine
     bool     zEnabled = true;            // F7 toggles
     uint8   *zMem;
     uint16  *zbuf;

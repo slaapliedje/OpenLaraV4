@@ -241,6 +241,7 @@ static void pollInput()
             if (code == 0x59 && down) quit = true;         // F10
         #ifdef OL_MAGGIE
             if (code == 0x56 && down) Mag::zEnabled = !Mag::zEnabled;   // F7: depth buffer on/off
+            if (code == 0x55 && down) Mag::perspective = !Mag::perspective; // F6: perspective-correct texturing
         #endif
             InputKey k = rawToKey(code);
             if (k != ikNone) Input::setDown(k, down);
@@ -355,6 +356,41 @@ static void saveFrame(const char *prefix, int frame, const uint16 *pixels)
     if (f) { fwrite(pixels, 2, SCREEN_WIDTH * SCREEN_HEIGHT, f); fclose(f); }
 }
 
+// --- crash report: the task's trap handler records the exception, PC and registers, then
+// resumes in olCrashed() (user mode), which prints them, writes RAM:olcrash.txt, restores the
+// display and exits instead of leaving a hung task. ./crashaddr.py OFFSET names the function
+// (offsets are relative to main, see build*/map.txt).
+extern "C" {
+    ULONG olTrapNum, olTrapPC, olTrapRegs[16];
+    void olCrashed();
+    void olTrapHandler();
+}
+asm(".text\n.even\n.globl _olTrapHandler\n_olTrapHandler:\n"
+    "  movem.l d0-d7/a0-a6,_olTrapRegs\n"
+    "  move.l (sp)+,_olTrapNum\n"          // exec pushes the exception number
+    "  move.l usp,a0\n  move.l a0,_olTrapRegs+60\n"
+    "  move.l 2(sp),_olTrapPC\n"           // the frame: SR.w, PC.l, ...
+    "  move.l #_olCrashed,2(sp)\n"
+    "  rte\n");
+
+static void videoFree();
+static void sndStop();
+int main();
+
+void olCrashed()
+{
+    char buf[512];
+    int n = sprintf(buf, "CRASH: exception %lu at PC %08lx = main%+ld\n", olTrapNum, olTrapPC, (long)(olTrapPC - (ULONG)main));
+    for (int i = 0; i < 16; i++)
+        n += sprintf(buf + n, "%s%d=%08lx%s", i < 8 ? "d" : "a", i & 7, olTrapRegs[i], (i & 7) == 7 ? "\n" : " ");
+    printf("%s", buf);
+    BPTR f = Open((STRPTR)"RAM:olcrash.txt", MODE_NEWFILE);
+    if (f) { Write(f, buf, n); Close(f); }
+    sndStop();
+    videoFree();
+    Exit(20);
+}
+
 extern int    __argc;
 extern char **__argv;
 
@@ -375,6 +411,8 @@ __attribute__((noinline)) static int olMain()
     // frame times) and OUTPREFIX.raw (last frame, 320x240 RGB565 big-endian), then quits
     int headlessFrames = __argc > 3 ? atoi(__argv[2]) : 0;
     const char *outPrefix = __argc > 3 ? __argv[3] : NULL;
+    FindTask(NULL)->tc_TrapCode = (APTR)olTrapHandler;
+
     if (headlessFrames) {
         fbMem = (UBYTE*)AllocVec(SCREEN_WIDTH * 2 * SCREEN_HEIGHT + 64, MEMF_ANY | MEMF_CLEAR);
         if (!fbMem) return 20;
@@ -400,14 +438,19 @@ __attribute__((noinline)) static int olMain()
     GAPI::swColor = fb;
 
     char envTmp[8];                      // ENV:OLNOSOUND set = no sound task
+    struct Process *me = (struct Process*)FindTask(NULL);
+    APTR oldWin = me->pr_WindowPtr;
+    me->pr_WindowPtr = (APTR)-1;         // no "insert volume ENV:" requester where ENV: is missing
     bool noSound = GetVar((STRPTR)"OLNOSOUND", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0;
     bool sound = !headlessFrames && !noSound && sndStart();
 #ifdef OL_MAGGIE
     if (GetVar((STRPTR)"OLNOZ", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::zEnabled = false;   // ENV:OLNOZ: no depth buffer
+    if (GetVar((STRPTR)"OLNOPERSP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::perspective = false; // ENV:OLNOPERSP
 #endif
 #ifdef SW_NEAR_CLIP
     if (GetVar((STRPTR)"OLNOCLIP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) GAPI::swNearClip = false;  // ENV:OLNOCLIP
 #endif
+    me->pr_WindowPtr = oldWin;
     printf("sound: %s\n", sound ? "AHI" : "off");
 
     int loopFrame = 0;
