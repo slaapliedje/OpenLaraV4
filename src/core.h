@@ -110,7 +110,9 @@
     #undef USE_CUBEMAP_MIPS
 
     #define INV_SINGLE_PLAYER
-    #define SW_NEAR_CLIP            // gapi/sw.h: clip polygons at the near plane instead of dropping them
+    #ifndef OL_NO_NEAR_CLIP
+        #define SW_NEAR_CLIP        // gapi/sw.h: clip polygons at the near plane instead of dropping them
+    #endif
 #elif __BITTBOY__ || __MIYOO__
     #define _OS_BITTBOY 1
     #define _OS_LINUX   1

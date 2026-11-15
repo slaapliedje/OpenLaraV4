@@ -402,6 +402,12 @@ __attribute__((noinline)) static int olMain()
     char envTmp[8];                      // ENV:OLNOSOUND set = no sound task
     bool noSound = GetVar((STRPTR)"OLNOSOUND", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0;
     bool sound = !headlessFrames && !noSound && sndStart();
+#ifdef OL_MAGGIE
+    if (GetVar((STRPTR)"OLNOZ", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::zEnabled = false;   // ENV:OLNOZ: no depth buffer
+#endif
+#ifdef SW_NEAR_CLIP
+    if (GetVar((STRPTR)"OLNOCLIP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) GAPI::swNearClip = false;  // ENV:OLNOCLIP
+#endif
     printf("sound: %s\n", sound ? "AHI" : "off");
 
     int loopFrame = 0;

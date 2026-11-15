@@ -672,16 +672,17 @@ namespace GAPI {
     // which left holes in floors and walls close to the camera): primitives are walked whole, those
     // crossing w = SW_NEAR are clipped in clip space and drawn as a triangle fan.
     #define SW_NEAR 32.0f
+    bool swNearClip = true;              // false: drop primitives crossing the near plane (old behaviour)
 
     struct ClipVertex {
         vec4  c;                         // clip space (after the viewport matrix)
-        float u, v, l;
+        int32 u, v, l;
     };
 
-    void projectPush(const ClipVertex &cv) {
-        float x = clamp(cv.c.x / cv.c.w, -16384.0f, 16384.0f);
-        float y = clamp(cv.c.y / cv.c.w, -16384.0f, 16384.0f);
-        float z = cv.c.z / cv.c.w;
+    inline void projectPush(const vec4 &c, int32 u, int32 v, int32 l) {
+        float x = clamp(c.x / c.w, -16384.0f, 16384.0f);
+        float y = clamp(c.y / c.w, -16384.0f, 16384.0f);
+        float z = c.z / c.w;
         VertexSW r;
         r.x = int32(x) << 16;
         r.y = int32(y);
@@ -690,10 +691,10 @@ namespace GAPI {
     #else
         r.z = uint32(clamp(z, 0.0f, 1.0f) * 65535.0f) << 16;
     #endif
-        r.w = int32(cv.c.w) << 16;
-        r.u = int32(cv.u);
-        r.v = int32(cv.v);
-        r.l = int32(cv.l);
+        r.w = int32(c.w) << 16;
+        r.u = u;
+        r.v = v;
+        r.l = l;
         swIndices.push(swVertices.push(r));
     }
 
@@ -713,38 +714,39 @@ namespace GAPI {
 
         int i = 0;
         while (i < iCount) {
-            const Vertex &first = vertices[vStart + indices[iStart + i]];
-            bool isTriangle = first.normal.w == 1;
-            int pos[4] = { i, i + 1, i + 2, i + 5 };   // quads come as 012 023: the 4th vertex is at +5
+            const Index *idx = indices + iStart + i;
+            bool isTriangle = vertices[vStart + idx[0]].normal.w == 1;
             int count = isTriangle ? 3 : 4;
             i += isTriangle ? 3 : 6;
             if (i > iCount) break;
 
             ClipVertex cv[4];
-            int behind = 0;
-            bool skip = false;
-            for (int k = 0; k < count; k++) {
-                const Vertex &vertex = vertices[vStart + indices[iStart + pos[k]]];
-                vec4 c = swMatrix * vec4(vertex.coord.x, vertex.coord.y, vertex.coord.z, 1.0f);
-                if (c.w > SW_MAX_DIST) { skip = true; break; }
-                if (c.w < nearW) behind++;
+            int behind = 0, k;
+            for (k = 0; k < count; k++) {
+                const Vertex &vertex = vertices[vStart + idx[k == 3 ? 5 : k]];   // quads come as 012 023
+                ClipVertex &o = cv[k];
+                o.c = swMatrix * vec4(vertex.coord.x, vertex.coord.y, vertex.coord.z, 1.0f);
+                if (o.c.w > SW_MAX_DIST) break;
+                if (o.c.w < nearW) {
+                    behind++;
+                    if (!swNearClip) break;
+                }
                 VertexSW lit;
                 lit.l = ((vertex.light.x * ambient) >> 8);
-                applyLighting(lit, vertex, max(c.w, 0.0f));
-                cv[k].c = c;
+                applyLighting(lit, vertex, o.c.w > 0.0f ? o.c.w : 0.0f);
+                o.l = lit.l;
                 if (colored) {
-                    cv[k].u = float(vertex.color.x << 16);
-                    cv[k].v = 0.0f;
+                    o.u = vertex.color.x << 16;
+                    o.v = 0;
                 } else {
-                    cv[k].u = float(vertex.texCoord.x << 16);
-                    cv[k].v = float(vertex.texCoord.y << 16);
+                    o.u = vertex.texCoord.x << 16;
+                    o.v = vertex.texCoord.y << 16;
                 }
-                cv[k].l = float(lit.l);
             }
-            if (skip || behind == count) continue;
+            if (k < count || behind == count) continue;     // too far, or dropped, or wholly behind
 
             if (!behind) {
-                for (int k = 0; k < count; k++) projectPush(cv[k]);
+                for (k = 0; k < count; k++) projectPush(cv[k].c, cv[k].u, cv[k].v, cv[k].l);
                 if (isTriangle)
                     swTriangles.push(swIndices.length - 3);
                 else
@@ -752,28 +754,23 @@ namespace GAPI {
                 continue;
             }
 
-            // Sutherland-Hodgman against w >= SW_NEAR: at most count + 1 vertices
-            ClipVertex out[5];
-            int n = 0;
-            for (int k = 0; k < count; k++) {
+            // Sutherland-Hodgman against w >= nearW: at most count + 1 vertices
+            int base = swIndices.length, n = 0;
+            for (k = 0; k < count; k++) {
                 const ClipVertex &a = cv[k];
                 const ClipVertex &b = cv[(k + 1) % count];
                 bool aIn = a.c.w >= nearW, bIn = b.c.w >= nearW;
-                if (aIn) out[n++] = a;
+                if (aIn) { projectPush(a.c, a.u, a.v, a.l); n++; }
                 if (aIn != bIn) {
                     float t = (nearW - a.c.w) / (b.c.w - a.c.w);
-                    ClipVertex &m = out[n++];
-                    m.c = a.c + (b.c - a.c) * t;
-                    m.c.w = nearW;
-                    m.u = a.u + (b.u - a.u) * t;
-                    m.v = a.v + (b.v - a.v) * t;
-                    m.l = a.l + (b.l - a.l) * t;
+                    vec4 c = a.c + (b.c - a.c) * t;
+                    c.w = nearW;
+                    projectPush(c, a.u + int32(float(b.u - a.u) * t), a.v + int32(float(b.v - a.v) * t),
+                                   a.l + int32(float(b.l - a.l) * t));
+                    n++;
                 }
             }
-            if (n < 3) continue;
-            int base = swIndices.length;
-            for (int k = 0; k < n; k++) projectPush(out[k]);
-            for (int k = 1; k + 1 < n; k++) {               // fan, same winding
+            for (k = 1; k + 1 < n; k++) {               // fan, same winding
                 swIndices.push(swIndices[base]);
                 swIndices.push(swIndices[base + k]);
                 swIndices.push(swIndices[base + k + 1]);
