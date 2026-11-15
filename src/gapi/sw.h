@@ -342,7 +342,11 @@ namespace GAPI {
 
     void setColorWrite(bool r, bool g, bool b, bool a) {}
 
-    void setAlphaTest(bool enable) {}
+    void setAlphaTest(bool enable) {
+    #ifdef OL_MAGGIE
+        Mag::alphaTest = enable;
+    #endif
+    }
 
     void setCullMode(int rsMask) {}
 

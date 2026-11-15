@@ -104,8 +104,8 @@ namespace Mag {
         dst[4] = pix & 0xFF;  dst[5] = (pix >> 8) & 0xFF; dst[6] = (pix >> 16) & 0xFF; dst[7] = pix >> 24;
     }
 
-    // 8-bit indexed size x size image -> DXT1 (index 0 transparent)
-    void encodeIndexed(const uint8 *src, const uint16 *pal565, int size, uint8 *dst) {
+    // 8-bit indexed size x size image -> DXT1 (index 0 transparent when alpha0)
+    void encodeIndexed(const uint8 *src, const uint16 *pal565, int size, uint8 *dst, bool alpha0 = true) {
         uint16 c[16]; uint8 op[16];
         for (int by = 0; by < size; by += 4)
             for (int bx = 0; bx < size; bx += 4) {
@@ -113,7 +113,7 @@ namespace Mag {
                     for (int j = 0; j < 4; j++) {
                         uint8 idx = src[(by + i) * size + bx + j];
                         c[i * 4 + j]  = pal565[idx];
-                        op[i * 4 + j] = idx != 0;
+                        op[i * 4 + j] = idx != 0 || !alpha0;
                     }
                 encodeBlock(c, op, dst);
                 dst += 8;
@@ -123,7 +123,11 @@ namespace Mag {
 // --- state -----------------------------------------------------------------------------------
     #define MAG_MAX_PAGES 32
 
+    // two DXT1 copies of each page: opaque (index 0 drawn, for opaque faces: with bilinear filtering
+    // a transparent texel next to a face's texture cell would leave see-through dots along edges)
+    // and alpha (index 0 transparent, for alpha-tested faces and sprites); one copy if no index 0
     uint8   *pageMem[MAG_MAX_PAGES], *pageTex[MAG_MAX_PAGES];
+    uint8   *pageMemA[MAG_MAX_PAGES], *pageTexA[MAG_MAX_PAGES];
     int      pageCount;
     const Tile8 *tiles;                  // level pages (GAPI texture proxy), set by setTiles()
     int      tilesCount;
@@ -153,13 +157,19 @@ namespace Mag {
     bool     zOn;                        // this frame
     bool     zTest = true;               // GAPI::setDepthTest (off for 2D: UI text, sprites on screen)
     bool     zSpan;                      // current spans test/write depth
+    bool     alphaTest;                  // GAPI::setAlphaTest: transparent texels (alpha page)
+    bool     bilinear = true;            // F8 toggles: filtered textures on 3D faces
+    bool     curFlat;                    // the bound texture is the white one (flat colour)
 
+    // Maggie mode: bit2 16-bit output, bit1 z test/write, bit0 bilinear (3D textured faces only:
+    // not UI text, which would blur, nor flat colours)
     inline void depthMode() {
         bool z = zOn && zTest;
-        if (z != zSpan) {
-            zSpan = z;
-            curMode = z ? 0x0006 : 0x0004;
-            MAG_REGS->mode = curMode;
+        uint16 mode = 0x0004 | (z ? 0x0002 : 0) | (bilinear && zTest && !curFlat ? 0x0001 : 0);
+        zSpan = z;
+        if (mode != curMode) {
+            curMode = mode;
+            MAG_REGS->mode = mode;
         }
     }
 
@@ -169,8 +179,11 @@ namespace Mag {
     }
 
     void freePages() {
-        for (int i = 0; i < pageCount; i++)
+        for (int i = 0; i < pageCount; i++) {
             if (pageMem[i]) { osMagFree(pageMem[i]); pageMem[i] = pageTex[i] = NULL; }
+            if (pageMemA[i]) { osMagFree(pageMemA[i]); pageMemA[i] = NULL; }
+            pageTexA[i] = NULL;
+        }
         pageCount = 0;
         uploadedTiles = NULL;
     }
@@ -180,7 +193,15 @@ namespace Mag {
         int count = min(tilesCount, MAG_MAX_PAGES);
         for (int t = 0; t < count; t++) {
             pageTex[t] = allocTex(256 * 256 / 2, &pageMem[t]);
-            if (pageTex[t]) encodeIndexed(tiles[t].index, pal565, 256, pageTex[t]);
+            if (pageTex[t]) encodeIndexed(tiles[t].index, pal565, 256, pageTex[t], false);
+            pageTexA[t] = pageTex[t];
+            pageMemA[t] = NULL;
+            bool anyZero = false;
+            for (int i = 0; i < 65536 && !anyZero; i++) anyZero = tiles[t].index[i] == 0;
+            if (anyZero) {
+                uint8 *a = allocTex(256 * 256 / 2, &pageMemA[t]);
+                if (a) { encodeIndexed(tiles[t].index, pal565, 256, a, true); pageTexA[t] = a; }
+            }
         }
         pageCount = count;
         uploadedTiles = tiles;
@@ -298,13 +319,15 @@ namespace Mag {
         if (tiles && palValid && uploadedTiles != tiles) uploadPages();
         int t = int(tile - tiles);
         if (t < 0 || t >= pageCount || !pageTex[t]) return false;
-        texture(pageTex[t], 8);
+        texture(alphaTest ? pageTexA[t] : pageTex[t], 8);
+        curFlat = false;
         colour(tint);
         return true;
     }
 
     void bindFlat(int index) {
         texture(whiteTex, 5);
+        curFlat = true;
         colour(mulRGB(palRGB[index & 255], tint));
     }
 
