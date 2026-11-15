@@ -16,6 +16,8 @@
 #include <proto/graphics.h>
 #include <proto/lowlevel.h>
 #include <intuition/intuition.h>
+#include <exec/semaphores.h>
+#include <dos/dostags.h>
 #include <cybergraphx/cybergraphics.h>
 #include <proto/cybergraphics.h>
 #undef Object
@@ -51,16 +53,120 @@ int osGetTimeMS()
     return (int)(((uint64)timeAcc * 1000) >> 16);
 }
 
-void* osMutexInit()            { return (void*)1; }   // single-threaded build
-void  osMutexFree(void*)       {}
-void  osMutexLock(void*)       {}
-void  osMutexUnlock(void*)     {}
-void* osRWLockInit()           { return (void*)1; }
-void  osRWLockFree(void*)      {}
-void  osRWLockRead(void*)      {}
-void  osRWUnlockRead(void*)    {}
-void  osRWLockWrite(void*)     {}
-void  osRWUnlockWrite(void*)   {}
+// the sound task mixes in parallel with the game: the engine's locks are exec semaphores
+static void* newSemaphore()
+{
+    struct SignalSemaphore *s = (struct SignalSemaphore*)AllocVec(sizeof(*s), MEMF_PUBLIC | MEMF_CLEAR);
+    if (s) InitSemaphore(s);
+    return s;
+}
+void* osMutexInit()            { return newSemaphore(); }
+void  osMutexFree(void *m)     { FreeVec(m); }
+void  osMutexLock(void *m)     { ObtainSemaphore((struct SignalSemaphore*)m); }
+void  osMutexUnlock(void *m)   { ReleaseSemaphore((struct SignalSemaphore*)m); }
+void* osRWLockInit()           { return newSemaphore(); }
+void  osRWLockFree(void *m)    { FreeVec(m); }
+void  osRWLockRead(void *m)    { ObtainSemaphoreShared((struct SignalSemaphore*)m); }
+void  osRWUnlockRead(void *m)  { ReleaseSemaphore((struct SignalSemaphore*)m); }
+void  osRWLockWrite(void *m)   { ObtainSemaphore((struct SignalSemaphore*)m); }
+void  osRWUnlockWrite(void *m) { ReleaseSemaphore((struct SignalSemaphore*)m); }
+
+// --- sound: AHI (on the V4 the ARNE driver = SAGA 16-bit audio) ---------------------------------
+// A task of its own keeps two AHI write requests in flight: while one plays, Sound::fill() mixes the
+// next (always the same frame count: the mixer sizes its scratch buffer on the first call).
+// Interface of ahi.device V4 (declared here: the AHI SDK headers are not part of this tree).
+struct OLAHIRequest {
+    struct IOStdReq ahir_Std;
+    UWORD   ahir_Version;
+    UWORD   ahir_Pad1;
+    ULONG   ahir_Private[2];
+    ULONG   ahir_Type;
+    ULONG   ahir_Frequency;
+    LONG    ahir_Volume;                 // 16.16
+    LONG    ahir_Position;               // 16.16, 0.5 = centre
+    struct OLAHIRequest *ahir_Link;
+};
+#define OL_AHI_DEFAULT_UNIT 0
+#define OL_AHIST_S16S       3
+
+#define SND_FRAMES 1024                  // 23 ms at 44.1 kHz per buffer
+static volatile bool sndQuit = false;
+static volatile bool sndRunning = false;
+static struct Task *sndMainTask = NULL;
+static BYTE sndDoneSig = -1;
+
+static void sndTask()
+{
+    struct MsgPort *port = CreateMsgPort();
+    OLAHIRequest *req[2] = { NULL, NULL };
+    Sound::Frame *buf[2] = { NULL, NULL };
+    bool open = false;
+    if (port) {
+        req[0] = (OLAHIRequest*)CreateIORequest(port, sizeof(OLAHIRequest));
+        req[1] = (OLAHIRequest*)AllocVec(sizeof(OLAHIRequest), MEMF_PUBLIC);
+        buf[0] = (Sound::Frame*)AllocVec(SND_FRAMES * sizeof(Sound::Frame), MEMF_PUBLIC | MEMF_CLEAR);
+        buf[1] = (Sound::Frame*)AllocVec(SND_FRAMES * sizeof(Sound::Frame), MEMF_PUBLIC | MEMF_CLEAR);
+        if (req[0] && req[1] && buf[0] && buf[1]) {
+            req[0]->ahir_Version = 4;
+            open = OpenDevice((STRPTR)"ahi.device", OL_AHI_DEFAULT_UNIT, (struct IORequest*)req[0], 0) == 0;
+        }
+    }
+    if (open) {
+        CopyMem(req[0], req[1], sizeof(OLAHIRequest));
+        sndRunning = true;
+        OLAHIRequest *link = NULL;
+        int cur = 0;
+        while (!sndQuit) {
+            Sound::fill(buf[cur], SND_FRAMES);
+            OLAHIRequest *r = req[cur];
+            r->ahir_Std.io_Message.mn_Node.ln_Pri = 0;
+            r->ahir_Std.io_Command = CMD_WRITE;
+            r->ahir_Std.io_Data    = buf[cur];
+            r->ahir_Std.io_Length  = SND_FRAMES * sizeof(Sound::Frame);
+            r->ahir_Std.io_Offset  = 0;
+            r->ahir_Type      = OL_AHIST_S16S;
+            r->ahir_Frequency = 44100;
+            r->ahir_Volume    = 0x10000;
+            r->ahir_Position  = 0x8000;
+            r->ahir_Link      = link;
+            SendIO((struct IORequest*)r);
+            if (link) WaitIO((struct IORequest*)link);   // the previous buffer has finished playing
+            link = r;
+            cur ^= 1;
+        }
+        if (link) { AbortIO((struct IORequest*)link); WaitIO((struct IORequest*)link); }
+        CloseDevice((struct IORequest*)req[0]);
+    }
+    if (req[1]) FreeVec(req[1]);
+    if (req[0]) DeleteIORequest((struct IORequest*)req[0]);
+    if (buf[0]) FreeVec(buf[0]);
+    if (buf[1]) FreeVec(buf[1]);
+    if (port) DeleteMsgPort(port);
+    sndRunning = false;
+    Forbid();                            // the main task may free our code once signalled
+    Signal(sndMainTask, 1UL << sndDoneSig);
+}
+
+static bool sndStart()
+{
+    sndMainTask = FindTask(NULL);
+    sndDoneSig = AllocSignal(-1);
+    if (sndDoneSig < 0) return false;
+    sndQuit = false;
+    struct Process *p = CreateNewProcTags(NP_Entry, (ULONG)sndTask, NP_Name, (ULONG)"OpenLara sound",
+                                          NP_Priority, 5, NP_StackSize, 128 * 1024, TAG_DONE);
+    if (!p) { FreeSignal(sndDoneSig); sndDoneSig = -1; return false; }
+    return true;
+}
+
+static void sndStop()
+{
+    if (sndDoneSig < 0) return;
+    sndQuit = true;
+    Wait(1UL << sndDoneSig);
+    FreeSignal(sndDoneSig);
+    sndDoneSig = -1;
+}
 
 // Maggie backend (gapi/sw.h + maggie_sw.h with -DOL_MAGGIE): memory and cache calls
 void* osMagAlloc(int size)     { return AllocVec(size, MEMF_ANY | MEMF_CLEAR); }
@@ -293,6 +399,11 @@ __attribute__((noinline)) static int olMain()
     GAPI::resize();
     GAPI::swColor = fb;
 
+    char envTmp[8];                      // ENV:OLNOSOUND set = no sound task
+    bool noSound = GetVar((STRPTR)"OLNOSOUND", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0;
+    bool sound = !headlessFrames && !noSound && sndStart();
+    printf("sound: %s\n", sound ? "AHI" : "off");
+
     int loopFrame = 0;
     if (headlessFrames && __argc > 4 && loadScript(__argv[4]))
         fakeTimeMS = 0;
@@ -378,6 +489,7 @@ __attribute__((noinline)) static int olMain()
         }
     }
 
+    if (sound) sndStop();
     if (out) fclose(out);
     Game::deinit();
     videoFree();
