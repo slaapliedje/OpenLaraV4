@@ -2,7 +2,7 @@
 // Experiment: the engine's software renderer (GAPI_SW) draws RGB565 into our own buffer, and the
 // SAGA display is pointed at it (P96 only opens the screen for the mode). No sound yet.
 // Run from a Shell in the directory that holds DATA/:  OpenLara [DATA/LEVEL1.PHD]  (no level = title screen)
-// Prints a frame-time profile (update / render ms) every 100 frames. Esc or F10 quits (or RAM:olquit).
+// Prints a frame-time profile (update / render ms) every 100 frames. F10 quits (or RAM:olquit); Esc is the game's inventory key.
 // Headless test (no screen, e.g. in the emulator): OpenLara LEVEL FRAMES OUTPREFIX - writes level stats
 // (compare with phdstats.py) and the last frame, see emu.sh.
 
@@ -252,7 +252,6 @@ __attribute__((noinline)) static int olMain()
     }
     while (!quit) {
         if (!headlessFrames) pollInput();
-        if (Input::down[ikEscape]) break;
 
         int a = osGetTimeMS();
         bool draw = Game::update();
