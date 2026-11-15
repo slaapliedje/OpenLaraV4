@@ -908,6 +908,9 @@ namespace Sound {
                     stream->read(size);
                     if (type == FOURCC("fmt ")) {
                         stream->raw(&waveFmt, sizeof(waveFmt));
+                        LE_FIX(waveFmt.format);   LE_FIX(waveFmt.channels);
+                        LE_FIX(waveFmt.samplesPerSec); LE_FIX(waveFmt.bytesPerSec);
+                        LE_FIX(waveFmt.block);    LE_FIX(waveFmt.sampleBits);
                         stream->seek(size - sizeof(waveFmt));
                     } else if (type == FOURCC("data")) {
                         if (waveFmt.format == 1) decoder = new PCM(stream, waveFmt.channels, waveFmt.samplesPerSec, size, waveFmt.sampleBits);
@@ -1262,6 +1265,8 @@ namespace Sound {
 
             stream->seek(sizeof(entity) * index);
             stream->raw(&entity, sizeof(entity));
+            LE_FIX(entity.size);
+            LE_FIX(entity.offset);
             stream->setPos(entity.offset);
             return stream;
         }

@@ -42,9 +42,11 @@ static ULONG sagaOld = 0;
 // --- OS hooks the engine needs ---------------------------------------------------------------
 static struct EClockVal eclock;
 static ULONG timeAcc = 0;   // 16.16 seconds
+static int fakeTimeMS = -1; // scripted headless runs: virtual time, 30 fps steps (deterministic)
 
 int osGetTimeMS()
 {
+    if (fakeTimeMS >= 0) return fakeTimeMS;
     timeAcc += ElapsedTime(&eclock);
     return (int)(((uint64)timeAcc * 1000) >> 16);
 }
@@ -84,6 +86,44 @@ static InputKey rawToKey(UWORD code)
 }
 
 static bool quit = false;
+
+// --- scripted input for headless runs: lines "FRAME KEY 1|0" (KEY: up down left right ctrl alt
+// shift space enter esc tab del back) or "FRAME shot" (save the frame as OUTPREFIX-FRAME.raw).
+// FRAME counts loop iterations from the start; time advances 1/30 s per iteration.
+struct ScriptEvent { int frame; int key; int down; };   // key -1 = shot
+static ScriptEvent script[512];
+static int scriptCount = 0, scriptPos = 0;
+
+static bool loadScript(const char *name)
+{
+    FILE *f = fopen(name, "r");
+    if (!f) { printf("no script %s\n", name); return false; }
+    static const struct { const char *name; InputKey key; } keys[] = {
+        { "up", ikUp }, { "down", ikDown }, { "left", ikLeft }, { "right", ikRight }, { "ctrl", ikCtrl },
+        { "alt", ikAlt }, { "shift", ikShift }, { "space", ikSpace }, { "enter", ikEnter },
+        { "esc", ikEscape }, { "tab", ikTab }, { "del", ikDel }, { "back", ikBack },
+    };
+    char line[128], name2[32];
+    while (scriptCount < 512 && fgets(line, sizeof(line), f)) {
+        int frame, down = 1;
+        if (line[0] == '#' || sscanf(line, "%d %31s %d", &frame, name2, &down) < 2) continue;
+        ScriptEvent &e = script[scriptCount];
+        e.frame = frame; e.down = down; e.key = -2;
+        if (!strcmp(name2, "shot")) e.key = -1;
+        for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+            if (!strcmp(name2, keys[i].name)) e.key = keys[i].key;
+        if (e.key != -2) scriptCount++;
+    }
+    fclose(f);
+    for (int i = 1; i < scriptCount; i++)           // by frame, keeping file order within a frame
+        for (int j = i; j > 0 && script[j - 1].frame > script[j].frame; j--) {
+            ScriptEvent t = script[j]; script[j] = script[j - 1]; script[j - 1] = t;
+        }
+    printf("script: %d events\n", scriptCount);
+    return true;
+}
+
+static void saveFrame(const char *prefix, int frame, const uint16 *pixels);
 
 static void pollInput()
 {
@@ -198,6 +238,14 @@ static void dumpLevelStats(FILE *f)
             (long)l.entities[0].x, (long)l.entities[0].y, (long)l.entities[0].z, l.entities[0].rotation.value, l.entities[0].flags.value);
 }
 
+static void saveFrame(const char *prefix, int frame, const uint16 *pixels)
+{
+    char name[256];
+    sprintf(name, "%s-%04d.raw", prefix, frame);
+    FILE *f = fopen(name, "wb");
+    if (f) { fwrite(pixels, 2, SCREEN_WIDTH * SCREEN_HEIGHT, f); fclose(f); }
+}
+
 extern int    __argc;
 extern char **__argv;
 
@@ -242,6 +290,9 @@ __attribute__((noinline)) static int olMain()
     GAPI::resize();
     GAPI::swColor = fb;
 
+    int loopFrame = 0;
+    if (headlessFrames && __argc > 4 && loadScript(__argv[4]))
+        fakeTimeMS = 0;
     int frames = 0, tUpd = 0, tRen = 0, tStart = osGetTimeMS();
     int levelFrames = -1;
     FILE *out = NULL;
@@ -252,6 +303,17 @@ __attribute__((noinline)) static int olMain()
     }
     while (!quit) {
         if (!headlessFrames) pollInput();
+        bool shotNow = false;
+        while (scriptPos < scriptCount && script[scriptPos].frame <= loopFrame) {
+            ScriptEvent &e = script[scriptPos++];
+            if (e.key == -1) shotNow = true;
+            else Input::setDown(InputKey(e.key), e.down != 0);
+            if (out && inventory)
+                fprintf(out, "script %d key %d %d: inv active %d ring %d page %d choose %d title %d dt %d settings %d\n", loopFrame, e.key, e.down,
+                        inventory->active, int(inventory->phaseRing * 100), int(inventory->phasePage * 100), int(inventory->phaseChoose * 100),
+                        int(inventory->titleTimer * 100), int(Core::deltaTime * 1000), Core::settings.version);
+        }
+        if (fakeTimeMS >= 0) fakeTimeMS += 33;
 
         int a = osGetTimeMS();
         bool draw = Game::update();
@@ -279,6 +341,12 @@ __attribute__((noinline)) static int olMain()
             printf("headless: no level after 500 frames - quitting\n");
             break;
         }
+        if (shotNow && outPrefix) saveFrame(outPrefix, loopFrame, fb);
+        if (out && fakeTimeMS >= 0 && (loopFrame % 30) == 0) {
+            fprintf(out, "loop %d level %d\n", loopFrame, Game::level ? (int)Game::level->level.id : -1);
+            fflush(out);
+        }
+        loopFrame++;
         if (headlessFrames && Game::level) {
             if (levelFrames < 0) {
                 levelFrames = 0;
