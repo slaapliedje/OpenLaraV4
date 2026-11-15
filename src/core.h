@@ -101,6 +101,15 @@
     #define DYNGEOM_NO_VBO
     #define INV_GAMEPAD_ONLY
     #define INV_STEREO
+#elif defined(__AMIGA__)
+    // Apollo Vampire V4 (68080 + SAGA), AmigaOS 3.x: software renderer into a 16-bit SAGA screen
+    #define _OS_AMIGA   1
+    #define _GAPI_SW    1
+
+    #undef OS_PTHREAD_MT
+    #undef USE_CUBEMAP_MIPS
+
+    #define INV_SINGLE_PLAYER
 #elif __BITTBOY__ || __MIYOO__
     #define _OS_BITTBOY 1
     #define _OS_LINUX   1

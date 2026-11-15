@@ -9,12 +9,12 @@
 
 //#define DITHER_FILTER
 
-#if defined(_OS_LINUX) || defined(_OS_TNS)
+#if defined(_OS_LINUX) || defined(_OS_TNS) || defined(_OS_AMIGA)
     #define COLOR_16
 #endif
 
 #ifdef COLOR_16
-    #if defined(_OS_LINUX) || defined(_OS_TNS)
+    #if defined(_OS_LINUX) || defined(_OS_TNS) || defined(_OS_AMIGA)
         #define COLOR_FMT_565
         #define CONV_COLOR(r,g,b) (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
     #else
