@@ -122,15 +122,16 @@ void freeSaveSlots() {
 }
 
 void readSaveSlots(Stream *stream) {
-    uint32 magic;
-    if (stream->size < 4 || stream->read(magic) != SAVE_MAGIC)
+    uint32 magic = 0;   // the save file is written in host byte order: read it raw (no swap)
+    if (stream->size >= 4) stream->raw(&magic, sizeof(magic));
+    if (magic != SAVE_MAGIC)
         return;
 
     freeSaveSlots();
 
     SaveSlot slot;
     while (stream->pos < stream->size) {
-        stream->read(slot.size);
+        stream->raw(&slot.size, sizeof(slot.size));
         stream->read(slot.data, slot.size);
         saveSlots.push(slot);
     }

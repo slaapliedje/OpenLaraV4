@@ -171,6 +171,67 @@ inline uint32 swap32(uint32 x) {
     return ((x & 0x000000FF) << 24) | ((x & 0x0000FF00) << 8) | ((x & 0x00FF0000) >> 8) | ((x & 0xFF000000) >> 24);
 }
 
+// Big-endian hosts: level files are little-endian. Stream::read() calls leFix() on every value it
+// reads, which swaps it to host order. Scalars and enums are handled here; each struct that is read
+// whole needs its own leFix() overload (next to the struct, found by ADL) - the generic template
+// refuses to compile for anything else, so a missing one is a build error, not a silent bad load.
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+    #define OL_BIG_ENDIAN
+#endif
+
+// Bitfields that overlay file data (a union with a "value" read from the level): GCC on big-endian
+// targets allocates bitfields from the most significant bit, so the field order is reversed there.
+// LE_BITS(type, f0, f1, ...) declares the fields as written on little-endian hosts and in reverse on
+// big-endian ones. The widths must add up to the full size of the type (pad with ":n").
+#define OL_BF_N(_1,_2,_3,_4,_5,_6,_7,_8,_9,_10,_11,_12,N,...) N
+#define OL_BF_CAT_(a, b) a##b
+#define OL_BF_CAT(a, b) OL_BF_CAT_(a, b)
+#define OL_BF_R1(a) a
+#define OL_BF_R2(a,b) b, a
+#define OL_BF_R3(a,b,c) c, b, a
+#define OL_BF_R4(a,b,c,d) d, c, b, a
+#define OL_BF_R5(a,b,c,d,e) e, d, c, b, a
+#define OL_BF_R6(a,b,c,d,e,f) f, e, d, c, b, a
+#define OL_BF_R7(a,b,c,d,e,f,g) g, f, e, d, c, b, a
+#define OL_BF_R8(a,b,c,d,e,f,g,h) h, g, f, e, d, c, b, a
+#define OL_BF_R9(a,b,c,d,e,f,g,h,i) i, h, g, f, e, d, c, b, a
+#define OL_BF_R10(a,b,c,d,e,f,g,h,i,j) j, i, h, g, f, e, d, c, b, a
+#define OL_BF_R11(a,b,c,d,e,f,g,h,i,j,k) k, j, i, h, g, f, e, d, c, b, a
+#define OL_BF_R12(a,b,c,d,e,f,g,h,i,j,k,l) l, k, j, i, h, g, f, e, d, c, b, a
+#ifdef OL_BIG_ENDIAN
+    #define LE_BITS(T, ...) T OL_BF_CAT(OL_BF_R, OL_BF_N(__VA_ARGS__,12,11,10,9,8,7,6,5,4,3,2,1,0))(__VA_ARGS__)
+#else
+    #define LE_BITS(T, ...) T __VA_ARGS__
+#endif
+
+#ifdef OL_BIG_ENDIAN
+    inline void leFix(char   &) {}
+    inline void leFix(int8   &) {}
+    inline void leFix(uint8  &) {}
+    inline void leFix(bool   &) {}
+    inline void leFix(int16  &x) { x = (int16)swap16((uint16)x); }
+    inline void leFix(uint16 &x) { x = swap16(x); }
+    inline void leFix(int32  &x) { x = (int32)swap32((uint32)x); }
+    inline void leFix(uint32 &x) { x = swap32(x); }
+    inline void leFix(float  &x) { union { float f; uint32 i; } u; u.f = x; u.i = swap32(u.i); x = u.f; }
+    inline void leFix(uint64 &x) { x = (uint64(swap32(uint32(x))) << 32) | swap32(uint32(x >> 32)); }
+    inline void leFix(int64  &x) { uint64 v = uint64(x); leFix(v); x = int64(v); }
+
+    template <typename T>
+    inline void leFix(T &x) {
+        static_assert(__is_enum(T) || sizeof(T) == 1, "big-endian: add a leFix() overload for this type");
+        if (sizeof(T) == 2) { uint16 v; memcpy(&v, &x, 2); v = swap16(v); memcpy(&x, &v, 2); }
+        if (sizeof(T) == 4) { uint32 v; memcpy(&v, &x, 4); v = swap32(v); memcpy(&x, &v, 4); }
+    }
+
+    template <typename T, int N>
+    inline void leFix(T (&a)[N]) { for (int i = 0; i < N; i++) leFix(a[i]); }
+
+    #define LE_FIX(x) leFix(x)
+#else
+    #define LE_FIX(x)
+#endif
+
 float clampAngle(float a) {
     return a < -PI ? a + PI2 : (a >= PI ? a - PI2 : a);
 }
@@ -1495,7 +1556,7 @@ struct Color24 { // RGB888
 };
 
 union Color16 { // RGBA5551
-    struct { uint16 b:5, g:5, r:5, a:1; };
+    struct { LE_BITS(uint16, b:5, g:5, r:5, a:1); };
     uint16 value;
 
     Color16() {}
@@ -1506,7 +1567,7 @@ union Color16 { // RGBA5551
 };
 
 union ColorCLUT { // RGBA5551
-    struct { uint16 r:5, g:5, b:5, a:1; };
+    struct { LE_BITS(uint16, r:5, g:5, b:5, a:1); };
     uint16 value;
 
     ColorCLUT() {}
@@ -1517,7 +1578,7 @@ union ColorCLUT { // RGBA5551
 };
 
 struct ColorIndex4 {
-    uint8 a:4, b:4;
+    LE_BITS(uint8, a:4, b:4);
 };
 
 struct Tile4 {
@@ -1562,6 +1623,21 @@ struct Tile32 {
 struct CLUT {
     ColorCLUT color[16];
 };
+
+#ifdef OL_BIG_ENDIAN
+    inline void leFix(Color16   &c) { leFix(c.value); }
+    inline void leFix(ColorCLUT &c) { leFix(c.value); }
+    inline void leFix(Color24   &)  {}
+    inline void leFix(Color32   &)  {}
+    inline void leFix(Tile4     &)  {}
+    inline void leFix(Tile8     &)  {}
+    inline void leFix(Tile16    &t) { leFix(t.color); }
+    inline void leFix(CLUT      &c) { leFix(c.color); }
+    inline void leFix(short2    &v) { leFix(v.x); leFix(v.y); }
+    inline void leFix(short3    &v) { leFix(v.x); leFix(v.y); leFix(v.z); }
+    inline void leFix(short4    &v) { leFix(v.x); leFix(v.y); leFix(v.z); leFix(v.w); }
+    inline void leFix(vec3      &v) { leFix(v.x); leFix(v.y); leFix(v.z); }
+#endif
 
 namespace StrUtils {
 
@@ -2272,6 +2348,9 @@ public:
     template <typename T>
     inline T& read(T &x) {
         raw(&x, sizeof(x));
+    #ifdef OL_BIG_ENDIAN
+        leFix(x);
+    #endif
         return x;
     }
 
@@ -2280,6 +2359,9 @@ public:
         if (count) {
             a = new T[count];
             raw(a, count * sizeof(T));
+        #ifdef OL_BIG_ENDIAN
+            for (int i = 0; i < count; i++) leFix(a[i]);
+        #endif
         } else
             a = NULL;
         return a;

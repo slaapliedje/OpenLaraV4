@@ -1618,8 +1618,13 @@ namespace TR {
     union fixed {
         uint32 value;
         struct {
+        #ifdef OL_BIG_ENDIAN
+            int16  H;
+            uint16 L;
+        #else
             uint16 L;
             int16  H;
+        #endif
         };
 
         operator float() const {
@@ -1696,12 +1701,12 @@ namespace TR {
 
     struct Face {
         union {
-            struct { uint16 texture:15, doubleSided:1; };
+            struct { LE_BITS(uint16, texture:15, doubleSided:1); };
             uint16 value;
         } flags;
 
         union {
-            struct { uint16 additive:1, env:1, shininess:6; };
+            struct { LE_BITS(uint16, additive:1, env:1, shininess:6, :8); };
             uint16 value;
         } effects;
 
@@ -1822,7 +1827,7 @@ namespace TR {
         int16   alternateRoom;
         union {
             struct {
-                uint16 water:1, :2, sky:1, :1, wind:1, unused:9, visible:1;
+                LE_BITS(uint16, water:1, :2, sky:1, :1, wind:1, unused:9, visible:1);
             };
             uint16 value;
         } flags;
@@ -1990,27 +1995,27 @@ namespace TR {
         uint16 value;
         union Command {
             struct {
-                uint16 func:5, tri:3, sub:7, end:1;
+                LE_BITS(uint16, func:5, tri:3, sub:7, end:1);
             };
             struct {
-                int16 :5, a:5, b:5, :1;
+                LE_BITS(int16, :5, a:5, b:5, :1);
             } triangle;
         } cmd;
         struct {
-            int16 slantX:8, slantZ:8;
+            LE_BITS(int16, slantX:8, slantZ:8);
         };
         struct {
-            uint16 a:4, b:4, c:4, d:4;
+            LE_BITS(uint16, a:4, b:4, c:4, d:4);
         };
         struct TriggerInfo {
-            uint16  timer:8, once:1, mask:5, :2;
+            LE_BITS(uint16, timer:8, once:1, mask:5, :2);
         } triggerInfo;
         union TriggerCommand {
             struct {
-                uint16 args:10, action:5, end:1;
+                LE_BITS(uint16, args:10, action:5, end:1);
             };
             struct {
-                uint16 timer:8, once:1, speed:5, :2;
+                LE_BITS(uint16, timer:8, once:1, speed:5, :2);
             };
         } triggerCmd;
 
@@ -2041,12 +2046,12 @@ namespace TR {
     };
 
     union Overlap {
-        struct { uint16 boxIndex:15, end:1; };
+        struct { LE_BITS(uint16, boxIndex:15, end:1); };
         uint16 value;
     };
 
     struct Flags {
-        uint16 :8, once:1, active:5, :2;
+        LE_BITS(uint16, :8, once:1, active:5, :2);
     };
 
     // internal mesh structure
@@ -2061,7 +2066,7 @@ namespace TR {
         int16       radius;
         union {
             struct {
-                uint16 isStatic:1, reserved:15;
+                LE_BITS(uint16, isStatic:1, reserved:15);
             };
             uint16 value;
         }           flags;
@@ -2096,7 +2101,7 @@ namespace TR {
         };
         union Flags {
             struct { 
-                uint16 state:2, unused:3, smooth:1, :1, invisible:1, once:1, active:5, reverse:1, rendered:1;
+                LE_BITS(uint16, state:2, unused:3, smooth:1, :1, invisible:1, once:1, active:5, reverse:1, rendered:1);
             };
             uint16 value;
         } flags;
@@ -2773,7 +2778,7 @@ namespace TR {
             int16   speed;  // for sink (underwater current)
         };
         union {
-            struct { uint16 :8, once:1, :5, :2; };
+            struct { LE_BITS(uint16, :8, once:1, :5, :2); };
             uint16 boxIndex;
         } flags;
     };
@@ -2825,7 +2830,7 @@ namespace TR {
         int16   floor; // Height value in global units
         union {
             struct {
-                uint16 index:14, block:1, blockable:1;    // Index into Overlaps[].
+                LE_BITS(uint16, index:14, block:1, blockable:1);    // Index into Overlaps[].
             };
             uint16 value;
         } overlap;
@@ -2864,7 +2869,7 @@ namespace TR {
         float  pitch;
         uint16 index;
         union {
-            struct { uint16 mode:2, count:4, unused:6, camera:1, pitch:1, gain:1, :1; };
+            struct { LE_BITS(uint16, mode:2, count:4, unused:6, camera:1, pitch:1, gain:1, :1); };
             uint16 value;
         } flags;
     };
@@ -2874,6 +2879,28 @@ namespace TR {
         uint16 box;
         vec3   pos;
     };
+
+#ifdef OL_BIG_ENDIAN
+    // structs read whole from little-endian level files (see leFix in utils.h)
+    using ::leFix;
+    inline void leFix(fixed       &v) { leFix(v.value); }
+    inline void leFix(angle       &v) { leFix(v.value); }
+    inline void leFix(FloorData   &v) { leFix(v.value); }
+    inline void leFix(Overlap     &v) { leFix(v.value); }
+    inline void leFix(AnimState   &v) { leFix(v.state); leFix(v.rangesCount); leFix(v.rangesOffset); }
+    inline void leFix(AnimRange   &v) { leFix(v.low); leFix(v.high); leFix(v.nextAnimation); leFix(v.nextFrame); }
+    inline void leFix(MinMax      &v) { leFix(v.minX); leFix(v.maxX); leFix(v.minY); leFix(v.maxY); leFix(v.minZ); leFix(v.maxZ); }
+    inline void leFix(StaticMesh  &v) { leFix(v.id); leFix(v.mesh); leFix(v.vbox); leFix(v.cbox); leFix(v.flags); }
+    inline void leFix(Camera      &v) { leFix(v.x); leFix(v.y); leFix(v.z); leFix(v.room); leFix(v.flags.boxIndex); }
+    inline void leFix(FlybyCamera &v) { leFix(v.x); leFix(v.y); leFix(v.z); leFix(v.dx); leFix(v.dy); leFix(v.dz);
+                                        leFix(v.fov); leFix(v.roll); leFix(v.timer); leFix(v.speed); leFix(v.flags); leFix(v.room); }
+    inline void leFix(CameraFrame &v) { leFix(v.target); leFix(v.pos); leFix(v.fov); leFix(v.roll); }
+    inline void leFix(AIObject    &v) { leFix(v.type); leFix(v.room); leFix(v.x); leFix(v.y); leFix(v.z); leFix(v.OCB); leFix(v.flags); leFix(v.angle); }
+    inline void leFix(SoundSource &v) { leFix(v.x); leFix(v.y); leFix(v.z); leFix(v.id); leFix(v.flags); }
+    inline void leFix(Room::Info  &v) { leFix(v.x); leFix(v.z); leFix(v.yBottom); leFix(v.yTop); }
+    inline void leFix(Room::Data::Sprite &v) { leFix(v.vertexIndex); leFix(v.texture); }
+    inline void leFix(Room::Portal &v) { leFix(v.roomIndex); leFix(v.normal); leFix(v.vertices); }
+#endif
 
     struct Level {
         Version         version;
@@ -3735,7 +3762,10 @@ namespace TR {
                 stream.seek(8 * size);
             }
 
-            stream.read(meshData,    stream.read(meshDataSize));
+            // mesh data stays in file byte order: initMesh() parses it through a Stream, which swaps
+            stream.read(meshDataSize);
+            meshData = meshDataSize ? new uint16[meshDataSize] : NULL;
+            stream.raw(meshData, sizeof(uint16) * meshDataSize);
             stream.read(meshOffsets, stream.read(meshOffsetsCount));
 
             readAnims(stream);
@@ -5691,7 +5721,7 @@ namespace TR {
 
                                     if (!f.colored) {
                                         union {
-                                            struct { uint16 texture:12, flip:4; };
+                                            struct { LE_BITS(uint16, texture:12, flip:4); };
                                             uint16 value;
                                         } tri;
 
@@ -6092,7 +6122,7 @@ namespace TR {
                 case VER_TR3_PC : {
                     struct {
                         uint16  attribute;
-                        uint16  tile:14, :2;
+                        union { struct { LE_BITS(uint16, tile:14, :2); }; uint16 tileValue; };
                         uint8   xh0, x0, yh0, y0;
                         uint8   xh1, x1, yh1, y1;
                         uint8   xh2, x2, yh2, y2;
@@ -6100,6 +6130,8 @@ namespace TR {
                     } d;
 
                     stream.raw(&d, sizeof(d));
+                    LE_FIX(d.attribute);
+                    LE_FIX(d.tileValue);
                     SET_PARAMS(t, d, 0);
                     break;
                 }
@@ -6107,7 +6139,7 @@ namespace TR {
                 case VER_TR5_PC : {
                     struct {
                         uint16  attribute;
-                        uint16  tile:14, :2;
+                        union { struct { LE_BITS(uint16, tile:14, :2); }; uint16 tileValue; };
                         uint16  flags;
                         uint8   xh0, x0, yh0, y0;
                         uint8   xh1, x1, yh1, y1;
@@ -6121,6 +6153,9 @@ namespace TR {
 
                     stream.raw(&d,   sizeof(d));
                     stream.raw(&duv, sizeof(duv));
+                    LE_FIX(d.attribute);
+                    LE_FIX(d.tileValue);
+                    LE_FIX(d.flags);
                     SET_PARAMS(t, d, 0);
                     break;
                 }
@@ -6214,6 +6249,8 @@ namespace TR {
                         int16   l, t, r, b;
                     } d;
                     stream.raw(&d, sizeof(d));
+                    LE_FIX(d.tile); LE_FIX(d.w); LE_FIX(d.h);
+                    LE_FIX(d.l); LE_FIX(d.t); LE_FIX(d.r); LE_FIX(d.b);
                     SET_PARAMS(t, d, 0);
                     t.texCoord[0] = t.texCoordAtlas[0] = short2( d.u,                       d.v                       );
                     t.texCoord[1] = t.texCoordAtlas[1] = short2( (uint8)(d.u + (d.w >> 8)), (uint8)(d.v + (d.h >> 8)) );
