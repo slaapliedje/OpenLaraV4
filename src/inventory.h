@@ -1718,6 +1718,14 @@ struct Inventory {
     void renderTitleBG(float sx = 1.0f, float sy = 1.0f, uint8 alpha = 255, float cropW = 1.0f, float cropH = 1.0f) {
         float aspectSrc, ax, ay, tx, ty;
 
+        #ifdef _GAPI_SW
+            if (background[0] && !video) {                   // RGBA picture (logo, title): copied in directly
+                Core::validateRenderState();                  // pending target clear first
+                GAPI::drawBackground(background[0]);
+                return;
+            }
+        #endif
+
         if (background[0]) {
             Texture *tex = background[0];
             float origW = float(tex->origWidth)  * cropW;

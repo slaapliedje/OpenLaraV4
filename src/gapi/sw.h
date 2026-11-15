@@ -1037,6 +1037,38 @@ namespace GAPI {
     #endif
     }
 
+    // Full-screen backgrounds (title picture): the software renderer can't draw RGBA textures, so
+    // the image is scaled to the screen once (RGB565, letterboxed) and copied in each frame.
+    ColorSW  *swBackground = NULL;
+    Texture  *swBackgroundSrc = NULL;
+
+    void drawBackground(Texture *tex) {
+        if (!tex || !tex->memory || tex->origWidth <= 0 || tex->origHeight <= 0) return;
+        int W = Core::width, H = Core::height;
+        if (tex != swBackgroundSrc || !swBackground) {
+            delete[] swBackground;
+            swBackground = new ColorSW[W * H];
+            memset(swBackground, 0, W * H * sizeof(ColorSW));
+            // fit the image's aspect into the screen
+            int dw = W, dh = W * tex->origHeight / tex->origWidth;
+            if (dh > H) { dh = H; dw = H * tex->origWidth / tex->origHeight; }
+            int ox = (W - dw) / 2, oy = (H - dh) / 2;
+            for (int y = 0; y < dh; y++) {
+                const uint8 *row = tex->memory + (y * tex->origHeight / dh) * tex->width * 4;
+                ColorSW *dst = swBackground + (oy + y) * W + ox;
+                for (int x = 0; x < dw; x++) {
+                    const uint8 *p = row + (x * tex->origWidth / dw) * 4;
+                    dst[x] = CONV_COLOR(p[0], p[1], p[2]);
+                }
+            }
+            swBackgroundSrc = tex;
+        }
+    #ifdef OL_MAGGIE
+        Mag::sync();                     // nothing still being drawn into the frame
+    #endif
+        memcpy(swColor, swBackground, W * H * sizeof(ColorSW));
+    }
+
     vec4 copyPixel(int x, int y) {
         return vec4(0.0f); // TODO: read from framebuffer
     }
