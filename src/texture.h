@@ -240,6 +240,9 @@ struct Texture : GAPI::Texture {
         } pcx;
 
         stream.raw(&pcx, sizeof(PCX));
+        LE_FIX(pcx.rect);
+        LE_FIX(pcx.width);
+        LE_FIX(pcx.height);
 
         ASSERT(pcx.bpp == 8);
         ASSERT(pcx.compression == 1);
@@ -663,7 +666,11 @@ struct Texture : GAPI::Texture {
         uint16 *end = src + width * height;
 
         while (src < end) {
+        #ifdef OL_BIG_ENDIAN
+            uint16 c = *src++;                   // big-endian data, already in host order
+        #else
             uint16 c = swap16(*src++);
+        #endif
             *dst++ = ((c & 0x001F) << 3) | ((c & 0x03E0) << 6) | (((c & 0x7C00) << 9)) | 0xFF000000;
         }
 
