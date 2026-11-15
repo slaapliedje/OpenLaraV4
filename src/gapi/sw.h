@@ -283,6 +283,7 @@ namespace GAPI {
 
     bool beginFrame() {
     #ifdef OL_MAGGIE
+        Mag::setDepthSize(Core::width, Core::height);
         Mag::setup();
     #endif
         return true;
@@ -330,7 +331,11 @@ namespace GAPI {
         swClipRect.w = Core::active.viewport.w - s.y;
     }
 
-    void setDepthTest(bool enable) {}
+    void setDepthTest(bool enable) {
+    #ifdef OL_MAGGIE
+        Mag::zTest = enable;
+    #endif
+    }
 
     void setDepthWrite(bool enable) {}
 
@@ -415,15 +420,19 @@ namespace GAPI {
             int32 lL = Mag::shading ? Mag::rowToLight(L.l >> 3) : 0xFFFF;
             int32 lR = Mag::shading ? Mag::rowToLight(R.l >> 3) : 0xFFFF;
             int32 dl = int32(float(lR - lL) * rf);
+            int32 z  = L.z;              // depth << 15
+            int32 dz = Mag::zOn ? int32(float(R.z - L.z) * rf) : 0;
             if (x1 < swClipRect.x) {
                 int32 k = swClipRect.x - x1;
-                u += du * k; v += dv * k; lL += dl * k;
+                u += du * k; v += dv * k; lL += dl * k; z += dz * k;
                 x1 = swClipRect.x;
             }
             if (x2 > swClipRect.z) x2 = swClipRect.z;
             if (x2 <= x1) return;
             if (magColored) Mag::bindFlat(L.u >> 16);
-            Mag::span(swColor + y * Core::width + x1, x2 - x1, u, v, du, dv, lL, dl);
+            Mag::depthMode();
+            int32 offset = y * Core::width + x1;
+            Mag::span(swColor + offset, x2 - x1, u, v, du, dv, lL, dl, offset, uint32(z) << 1, dz << 1);
             return;
         }
     #endif
@@ -658,6 +667,123 @@ namespace GAPI {
         result.l = (255 - min(255, int32(lighting))) << 16;
     }
 
+#ifdef SW_NEAR_CLIP
+    // Near-plane clipping (instead of dropping every primitive with a vertex behind the camera,
+    // which left holes in floors and walls close to the camera): primitives are walked whole, those
+    // crossing w = SW_NEAR are clipped in clip space and drawn as a triangle fan.
+    #define SW_NEAR 32.0f
+
+    struct ClipVertex {
+        vec4  c;                         // clip space (after the viewport matrix)
+        float u, v, l;
+    };
+
+    void projectPush(const ClipVertex &cv) {
+        float x = clamp(cv.c.x / cv.c.w, -16384.0f, 16384.0f);
+        float y = clamp(cv.c.y / cv.c.w, -16384.0f, 16384.0f);
+        float z = cv.c.z / cv.c.w;
+        VertexSW r;
+        r.x = int32(x) << 16;
+        r.y = int32(y);
+    #ifdef OL_MAGGIE
+        r.z = int32(clamp(z, 0.0f, 1.0f) * 65535.0f) << 15;
+    #else
+        r.z = uint32(clamp(z, 0.0f, 1.0f) * 65535.0f) << 16;
+    #endif
+        r.w = int32(cv.c.w) << 16;
+        r.u = int32(cv.u);
+        r.v = int32(cv.v);
+        r.l = int32(cv.l);
+        swIndices.push(swVertices.push(r));
+    }
+
+    bool transform(const Index *indices, const Vertex *vertices, int iStart, int iCount, int vStart) {
+        swVertices.reset();
+        swIndices.reset();
+        swTriangles.reset();
+        swQuads.reset();
+
+        mat4 swMatrix;
+        swMatrix.viewport(0.0f, (float)Core::height, (float)Core::width, -(float)Core::height, 0.0f, 1.0f);
+        swMatrix = swMatrix * mViewProj * mModel;
+
+        const bool colored = vertices[vStart + indices[iStart]].color.w == 142;
+        // orthographic projections (UI, 2D) have w = 1 everywhere: only perspective ones get the near plane
+        const float nearW = (Core::mProj.e33 == 1.0f) ? 0.0f : SW_NEAR;
+
+        int i = 0;
+        while (i < iCount) {
+            const Vertex &first = vertices[vStart + indices[iStart + i]];
+            bool isTriangle = first.normal.w == 1;
+            int pos[4] = { i, i + 1, i + 2, i + 5 };   // quads come as 012 023: the 4th vertex is at +5
+            int count = isTriangle ? 3 : 4;
+            i += isTriangle ? 3 : 6;
+            if (i > iCount) break;
+
+            ClipVertex cv[4];
+            int behind = 0;
+            bool skip = false;
+            for (int k = 0; k < count; k++) {
+                const Vertex &vertex = vertices[vStart + indices[iStart + pos[k]]];
+                vec4 c = swMatrix * vec4(vertex.coord.x, vertex.coord.y, vertex.coord.z, 1.0f);
+                if (c.w > SW_MAX_DIST) { skip = true; break; }
+                if (c.w < nearW) behind++;
+                VertexSW lit;
+                lit.l = ((vertex.light.x * ambient) >> 8);
+                applyLighting(lit, vertex, max(c.w, 0.0f));
+                cv[k].c = c;
+                if (colored) {
+                    cv[k].u = float(vertex.color.x << 16);
+                    cv[k].v = 0.0f;
+                } else {
+                    cv[k].u = float(vertex.texCoord.x << 16);
+                    cv[k].v = float(vertex.texCoord.y << 16);
+                }
+                cv[k].l = float(lit.l);
+            }
+            if (skip || behind == count) continue;
+
+            if (!behind) {
+                for (int k = 0; k < count; k++) projectPush(cv[k]);
+                if (isTriangle)
+                    swTriangles.push(swIndices.length - 3);
+                else
+                    swQuads.push(swIndices.length - 4);
+                continue;
+            }
+
+            // Sutherland-Hodgman against w >= SW_NEAR: at most count + 1 vertices
+            ClipVertex out[5];
+            int n = 0;
+            for (int k = 0; k < count; k++) {
+                const ClipVertex &a = cv[k];
+                const ClipVertex &b = cv[(k + 1) % count];
+                bool aIn = a.c.w >= nearW, bIn = b.c.w >= nearW;
+                if (aIn) out[n++] = a;
+                if (aIn != bIn) {
+                    float t = (nearW - a.c.w) / (b.c.w - a.c.w);
+                    ClipVertex &m = out[n++];
+                    m.c = a.c + (b.c - a.c) * t;
+                    m.c.w = nearW;
+                    m.u = a.u + (b.u - a.u) * t;
+                    m.v = a.v + (b.v - a.v) * t;
+                    m.l = a.l + (b.l - a.l) * t;
+                }
+            }
+            if (n < 3) continue;
+            int base = swIndices.length;
+            for (int k = 0; k < n; k++) projectPush(out[k]);
+            for (int k = 1; k + 1 < n; k++) {               // fan, same winding
+                swIndices.push(swIndices[base]);
+                swIndices.push(swIndices[base + k]);
+                swIndices.push(swIndices[base + k + 1]);
+                swTriangles.push(swIndices.length - 3);
+            }
+        }
+
+        return colored;
+    }
+#else
     bool transform(const Index *indices, const Vertex *vertices, int iStart, int iCount, int vStart) {
         swVertices.reset();
         swIndices.reset();
@@ -710,7 +836,11 @@ namespace GAPI {
             VertexSW result;
             result.x = int32(c.x) << 16;
             result.y = int32(c.y);
+        #ifdef OL_MAGGIE
+            result.z = int32(clamp(c.z, 0.0f, 1.0f) * 65535.0f) << 15;   // 31 bits: edge stepping is signed
+        #else
             result.z = uint32(clamp(c.z, 0.0f, 1.0f) * 65535.0f) << 16;
+        #endif
             result.w = int32(c.w);
 
             if (colored) {
@@ -738,6 +868,7 @@ namespace GAPI {
 
         return colored;
     }
+#endif
 
     void transformLights() {
         memcpy(lightsRel, lights, sizeof(LightSW) * lightsCount);

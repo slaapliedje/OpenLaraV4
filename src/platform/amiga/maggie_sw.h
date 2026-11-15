@@ -141,6 +141,25 @@ namespace Mag {
     uint32   tint;                       // 0x00RRGGBB multiply (water), 0xFFFFFF = none
     bool     shading;
 
+    // depth buffer: the software renderer has none (draw order only); Maggie tests and writes 16-bit
+    // depth per pixel, smaller = nearer. Values are the engine's z/w * 65535, linear in screen space.
+    bool     zEnabled = true;            // F7 toggles
+    uint8   *zMem;
+    uint16  *zbuf;
+    int      zWidth, zHeight;
+    bool     zOn;                        // this frame
+    bool     zTest = true;               // GAPI::setDepthTest (off for 2D: UI text, sprites on screen)
+    bool     zSpan;                      // current spans test/write depth
+
+    inline void depthMode() {
+        bool z = zOn && zTest;
+        if (z != zSpan) {
+            zSpan = z;
+            curMode = z ? 0x0006 : 0x0004;
+            MAG_REGS->mode = curMode;
+        }
+    }
+
     uint8* allocTex(int bytes, uint8 **mem) {
         *mem = (uint8*)osMagAlloc(bytes + 32);
         return *mem ? (uint8*)((uint32(*mem) + 31) & ~31U) : NULL;
@@ -200,13 +219,30 @@ namespace Mag {
         return whiteTex && sink;
     }
 
+    void setDepthSize(int width, int height) {
+        if (zMem && width == zWidth && height == zHeight) return;
+        if (zMem) { osMagFree(zMem); zMem = NULL; zbuf = NULL; }
+        zMem = (uint8*)osMagAlloc(width * height * 2 + 64);
+        if (zMem) zbuf = (uint16*)((uint32(zMem) + 63) & ~63U);
+        zWidth = width; zHeight = height;
+    }
+
+    void clearDepth() {                  // to far; the 080's data cache writes through
+        if (!zbuf) return;
+        uint32 *p = (uint32*)zbuf, *e = p + zWidth * zHeight / 2;
+        while (p < e) { p[0] = p[1] = p[2] = p[3] = p[4] = p[5] = p[6] = p[7] = 0xFFFFFFFF; p += 8; }
+    }
+
     void setup() {                       // start of a frame: registers to a known state
         volatile Regs *m = MAG_REGS;
-        m->mode = 0x0004;                // 16-bit output, point sampling, no z-buffer
+        zOn = zEnabled && zbuf;
+        if (zOn) clearDepth();
+        zSpan = zOn && zTest;
+        curMode = zSpan ? 0x0006 : 0x0004; // 16-bit output, point sampling, z test/write
+        m->mode = curMode;
         m->modulo = 2;
         m->uDeltaDelta = 0;
         m->vDeltaDelta = 0;
-        curMode = 0x0004;
         curTex = NULL; curTexSize = 0; curRGB = 0xFFFFFFFF;
     }
 
@@ -215,6 +251,7 @@ namespace Mag {
         if (!sink) return;
         volatile Regs *m = MAG_REGS;
         m->texture = sink; m->texSize = 5; curTex = NULL; curTexSize = 0;
+        if (zSpan) { m->depthDest = sink + 64; m->depthStart = 0xFFFF0000; m->depthDelta = 0; }
         m->pixDest = sink + 32;
         m->uCoord = 0; m->vCoord = 0; m->uDelta = 0; m->vDelta = 0;
         m->light = 0; m->lightDelta = 0;
@@ -229,6 +266,7 @@ namespace Mag {
     void deinit() {
         sync();                          // nothing may still be heading for memory we free
         freePages();
+        if (zMem) { osMagFree(zMem); zMem = NULL; zbuf = NULL; }
         if (whiteMem) { osMagFree(whiteMem); whiteMem = whiteTex = NULL; }
     }
 
@@ -276,8 +314,10 @@ namespace Mag {
     // One span. u/v in 16.16 texels of a 256 page (= Maggie 8:24 normalised), l = light row 16.16.
     // Maggie holds one span: work everything out first, then write the registers in one burst
     // ending with startLength; the CPU walks the next scanline while Maggie draws this one.
-    inline void span(uint16 *dst, int32 len, int32 u, int32 v, int32 du, int32 dv, int32 L, int32 dl) {
+    inline void span(uint16 *dst, int32 len, int32 u, int32 v, int32 du, int32 dv, int32 L, int32 dl,
+                     int32 offset = 0, uint32 z = 0, int32 dz = 0) {
         volatile Regs *m = MAG_REGS;     // first write waits for the previous span
+        if (zSpan) { m->depthDest = zbuf + offset; m->depthStart = z; m->depthDelta = dz; }
         m->pixDest = dst;
         m->uCoord = u;
         m->vCoord = v;
@@ -293,13 +333,19 @@ namespace Mag {
     void EmuStart::operator = (uint16 len) volatile {
         Regs *m = &emuRegs;
         uint16 *dst = (uint16*)m->pixDest;
+        uint16 *zb = (uint16*)m->depthDest;
+        bool zt = (m->mode & 2) != 0;
+        uint32 z = m->depthStart;
+        int32 dz = m->depthDelta;
         const uint8 *tex = (const uint8*)m->texture;
         int ts = m->texSize & 15, size = 1 << ts, shift = 24 - ts, bpr = size >> 2;
         uint32 u = m->uCoord, v = m->vCoord;
         int32 du = m->uDelta, dv = m->vDelta, l = m->light, dl = m->lightDelta;
         uint32 rgb = m->lightRGBA;
         int32 mr = (rgb >> 16) & 255, mg = (rgb >> 8) & 255, mb = rgb & 255;
-        for (int i = 0; i < len; i++, dst++, u += du, v += dv, l += dl) {
+        for (int i = 0; i < len; i++, dst++, zb++, u += du, v += dv, l += dl, z += dz) {
+            uint16 zz = uint16(z >> 16);
+            if (zt && zz > *zb) continue;
             int32 tx = (u >> shift) & (size - 1), ty = (v >> shift) & (size - 1);
             const uint8 *b = tex + ((ty >> 2) * bpr + (tx >> 2)) * 8;
             uint16 c0 = b[0] | (b[1] << 8), c1 = b[2] | (b[3] << 8);
@@ -328,6 +374,7 @@ namespace Mag {
             g  = int32((g  * f) >> 16) * mg / 255;
             bb = int32((bb * f) >> 16) * mb / 255;
             *dst = uint16((r << 11) | (g << 5) | bb);
+            if (zt) *zb = zz;
         }
     }
 #endif

@@ -133,6 +133,9 @@ static void pollInput()
             UWORD code = msg->Code & 0x7F;
             bool down = !(msg->Code & 0x80);
             if (code == 0x59 && down) quit = true;         // F10
+        #ifdef OL_MAGGIE
+            if (code == 0x56 && down) Mag::zEnabled = !Mag::zEnabled;   // F7: depth buffer on/off
+        #endif
             InputKey k = rawToKey(code);
             if (k != ikNone) Input::setDown(k, down);
         }
