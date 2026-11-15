@@ -1,13 +1,14 @@
 #!/bin/bash
 # Headless test of the main-engine Amiga build in Amiberry (68020+68882, no RTG, off screen on Xvfb).
-#   ./emu.sh [LEVEL] [FRAMES] [NAME]     e.g. ./emu.sh DATA/GYM.PHD 20 gym
+#   [BIN=OpenLaraMagEmu] ./emu.sh [LEVEL] [FRAMES] [NAME]     e.g. ./emu.sh DATA/GYM.PHD 20 gym
 # Needs ../../../emu-run (olmain.uae, C/UAEquit, DATA/*.PHD). Results: emu-run/out/NAME.txt (level
 # stats + frame times; compare with ./phdstats.py LEVEL) and NAME.png (last frame).
 set -eu
 H=$(cd "$(dirname "$0")" && pwd)
 R=$(cd "$H/../../.." && pwd)/emu-run
 L=${1:-DATA/GYM.PHD}; N=${2:-20}; NAME=${3:-gym}
-cp "$H/OpenLara" "$R/C/OpenLara"
+BIN=${BIN:-OpenLara}
+cp "$H/$BIN" "$R/C/OpenLara"
 rm -f "$R/out/$NAME.txt" "$R/out/$NAME.raw" "$R/out/$NAME.log"
 echo "C:OpenLara $L $N out/$NAME >out/$NAME.log" > "$R/S/Job"
 cd "$R"

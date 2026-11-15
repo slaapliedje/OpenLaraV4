@@ -3,6 +3,10 @@
 
 #include "core.h"
 
+#ifdef OL_MAGGIE
+    #include "platform/amiga/maggie_sw.h"   // spans drawn by the Vampire's Maggie unit
+#endif
+
 #define PROFILE_MARKER(title)
 #define PROFILE_LABEL(id, name, label)
 #define PROFILE_TIMING(time)
@@ -51,6 +55,9 @@ namespace GAPI {
     ColorSW swPaletteGray[256];
     uint8   swGradient[256];
     Tile8   *curTile;
+#ifdef OL_MAGGIE
+    bool    magColored;                  // current mesh range is flat-coloured (u = palette index)
+#endif
 
     uint8 ambient;
     int32 lightsCount;
@@ -237,9 +244,15 @@ namespace GAPI {
         LOG("Renderer : %s\n", "Software");
         LOG("Version  : %s\n", "0.1");
         swDepth = NULL;
+    #ifdef OL_MAGGIE
+        if (Mag::init()) LOG("Maggie   : on\n");
+    #endif
     }
 
     void deinit() {
+    #ifdef OL_MAGGIE
+        Mag::deinit();
+    #endif
         delete[] swDepth;
         swVertices.clear();
         swIndices.clear();
@@ -269,10 +282,17 @@ namespace GAPI {
     }
 
     bool beginFrame() {
+    #ifdef OL_MAGGIE
+        Mag::setup();
+    #endif
         return true;
     }
 
-    void endFrame() {}
+    void endFrame() {
+    #ifdef OL_MAGGIE
+        Mag::sync();                     // the frame is complete before it is shown
+    #endif
+    }
 
     void resetState() {}
 
@@ -288,6 +308,9 @@ namespace GAPI {
 
     void clear(bool color, bool depth) {
         if (color) {
+        #ifdef OL_MAGGIE
+            Mag::sync();                 // Maggie may still be writing the last spans
+        #endif
             memset(swColor, 0x00, Core::width * Core::height * sizeof(ColorSW));
         }
 
@@ -379,6 +402,31 @@ namespace GAPI {
     };
 
     void drawLine(const VertexSW &L, const VertexSW &R, int32 y) {
+    #ifdef OL_MAGGIE
+        {
+            int32 x1 = L.x >> 16;
+            int32 x2 = R.x >> 16;
+            int32 f = x2 - x1;
+            if (f <= 0) return;
+            float rf = f < 1024 ? Mag::rcp[f] : 1.0f / float(f);
+            int32 u  = L.u, v = L.v;
+            int32 du = int32(float(R.u - L.u) * rf);
+            int32 dv = int32(float(R.v - L.v) * rf);
+            int32 lL = Mag::shading ? Mag::rowToLight(L.l >> 3) : 0xFFFF;
+            int32 lR = Mag::shading ? Mag::rowToLight(R.l >> 3) : 0xFFFF;
+            int32 dl = int32(float(lR - lL) * rf);
+            if (x1 < swClipRect.x) {
+                int32 k = swClipRect.x - x1;
+                u += du * k; v += dv * k; lL += dl * k;
+                x1 = swClipRect.x;
+            }
+            if (x2 > swClipRect.z) x2 = swClipRect.z;
+            if (x2 <= x1) return;
+            if (magColored) Mag::bindFlat(L.u >> 16);
+            Mag::span(swColor + y * Core::width + x1, x2 - x1, u, v, du, dv, lL, dl);
+            return;
+        }
+    #endif
         int32 x1 = L.x >> 16;
         int32 x2 = R.x >> 16;
 
@@ -716,6 +764,14 @@ namespace GAPI {
             curTile = (Tile8*)swGradient;
         }
 
+    #ifdef OL_MAGGIE
+        magColored = colored;
+        if (!colored && !Mag::bindTile(oldTile)) {
+            curTile = oldTile;
+            return;
+        }
+    #endif
+
         for (int i = 0; i < swQuads.length; i++) {
             drawQuad(&swIndices[swQuads[i]]);
         }
@@ -743,14 +799,23 @@ namespace GAPI {
 
         swLightmap = swLightmapShade;
         swPalette  = swPaletteColor;
+    #ifdef OL_MAGGIE
+        Mag::setPalette(palette);
+    #endif
     }
 
     void setPalette(ColorSW *palette) {
         swPalette = palette;
+    #ifdef OL_MAGGIE
+        Mag::tint = (palette == swPaletteWater) ? 0x96E6E6 : 0xFFFFFF;   // as the water palette: r*150, g,b*230 /256
+    #endif
     }
 
     void setShading(bool enabled) {
         swLightmap = enabled ? swLightmapShade : swLightmapNone;
+    #ifdef OL_MAGGIE
+        Mag::shading = enabled;
+    #endif
     }
 
     vec4 copyPixel(int x, int y) {

@@ -13,6 +13,9 @@ struct Texture : GAPI::Texture {
 
             Texture(Tile8 *tiles, int tilesCount) : GAPI::Texture(256, 256, 1, OPT_PROXY) {
                 this->tiles = tiles;
+            #ifdef OL_MAGGIE
+                Mag::setTiles(tiles, tilesCount);
+            #endif
             }
         #elif defined(_GAPI_GU)
             Tile4 *tiles;

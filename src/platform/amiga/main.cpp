@@ -1,7 +1,7 @@
 // OpenLara main engine on the Apollo Vampire V4 (68080 + SAGA), AmigaOS 3.x.
 // Experiment: the engine's software renderer (GAPI_SW) draws RGB565 into our own buffer, and the
 // SAGA display is pointed at it (P96 only opens the screen for the mode). No sound yet.
-// Run from a Shell in the directory that holds DATA/:  OpenLara [DATA/LEVEL1.PHD]
+// Run from a Shell in the directory that holds DATA/:  OpenLara [DATA/LEVEL1.PHD]  (no level = title screen)
 // Prints a frame-time profile (update / render ms) every 100 frames. Esc or F10 quits (or RAM:olquit).
 // Headless test (no screen, e.g. in the emulator): OpenLara LEVEL FRAMES OUTPREFIX - writes level stats
 // (compare with phdstats.py) and the last frame, see emu.sh.
@@ -29,7 +29,9 @@ struct Library* LowLevelBase = NULL;
 static struct Screen* screen = NULL;
 static struct Window* window = NULL;
 static UBYTE* fbMem = NULL;
-static uint16* fb = NULL;
+static uint16* fb = NULL;               // the buffer being drawn
+static uint16* fbBuf[2];                // double buffering: SAGA shows one while we draw the other
+static int fbBack = 0;
 static ULONG sagaOld = 0;
 #define SAGA_GFXADDR   ((volatile ULONG*)0xDFF1EC)
 #define SAGA_GFXADDR_R ((volatile ULONG*)0xDFE1EC)
@@ -57,6 +59,11 @@ void  osRWLockRead(void*)      {}
 void  osRWUnlockRead(void*)    {}
 void  osRWLockWrite(void*)     {}
 void  osRWUnlockWrite(void*)   {}
+
+// Maggie backend (gapi/sw.h + maggie_sw.h with -DOL_MAGGIE): memory and cache calls
+void* osMagAlloc(int size)     { return AllocVec(size, MEMF_ANY | MEMF_CLEAR); }
+void  osMagFree(void *ptr)     { FreeVec(ptr); }
+void  osMagCacheFlush()        { CacheClearU(); }
 
 bool osJoyReady(int index)     { return index == 0; }
 void osJoyVibrate(int index, float L, float R) {}
@@ -129,13 +136,16 @@ static bool videoInit()
     printf("mode %08lx screen %dx%d bpr %lu base %08lx shown %08lx\n", modeID, screen->Width, screen->Height, bpr, base, *SAGA_GFXADDR_R);
     if (bpr != SCREEN_WIDTH * 2 || screen->Width != SCREEN_WIDTH) { printf("unexpected screen layout\n"); return false; }
 
-    // our own frame buffer, shown by pointing SAGA at it (P96 screen buffers flicker on vampiregfx)
-    ULONG size = SCREEN_WIDTH * 2 * screen->Height;
-    fbMem = (UBYTE*)AllocVec(size + 64, MEMF_ANY | MEMF_CLEAR);
+    // two frame buffers of our own, shown by pointing SAGA at them (P96 screen buffers flicker on vampiregfx)
+    ULONG size = (SCREEN_WIDTH * 2 * screen->Height + 63) & ~63UL;
+    fbMem = (UBYTE*)AllocVec(size * 2 + 64, MEMF_ANY | MEMF_CLEAR);
     if (!fbMem) return false;
-    fb = (uint16*)(((ULONG)fbMem + 63) & ~63UL);
+    fbBuf[0] = (uint16*)(((ULONG)fbMem + 63) & ~63UL);
+    fbBuf[1] = (uint16*)((UBYTE*)fbBuf[0] + size);
     sagaOld = base;
-    *SAGA_GFXADDR = (ULONG)fb;
+    *SAGA_GFXADDR = (ULONG)fbBuf[1];
+    fbBack = 0;
+    fb = fbBuf[0];
     return true;
 }
 
@@ -222,8 +232,9 @@ __attribute__((noinline)) static int olMain()
     Core::height = SCREEN_HEIGHT;
     Core::defLang = 0;
 
-    const char* level = __argc > 1 ? __argv[1] : "DATA/GYM.PHD";
-    printf("loading %s\n", level);
+    const char* level = __argc > 1 ? __argv[1] : NULL;     // no level ("" or -): the normal game (title screen)
+    if (level && (!level[0] || !strcmp(level, "-"))) level = NULL;
+    printf("loading %s\n", level ? level : "title");
     int t0 = osGetTimeMS();
     Game::init(level);
     printf("init %d ms\n", osGetTimeMS() - t0);
@@ -252,10 +263,23 @@ __attribute__((noinline)) static int olMain()
             break;
         }
         int b = osGetTimeMS();
-        if (draw) Game::render();
+        if (draw) {
+            Game::render();              // ends with GAPI::endFrame: Maggie has finished the frame
+            if (!headlessFrames) {       // show it, draw the next one into the other buffer
+                *SAGA_GFXADDR = (ULONG)fb;
+                fbBack ^= 1;
+                fb = fbBuf[fbBack];
+                GAPI::swColor = fb;
+            }
+        }
         int c = osGetTimeMS();
         tUpd += b - a; tRen += c - b;
 
+        static int noLevelFrames = 0;
+        if (headlessFrames && !Game::level && ++noLevelFrames > 500) {
+            printf("headless: no level after 500 frames - quitting\n");
+            break;
+        }
         if (headlessFrames && Game::level) {
             if (levelFrames < 0) {
                 levelFrames = 0;
