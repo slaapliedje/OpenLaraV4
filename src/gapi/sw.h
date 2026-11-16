@@ -57,7 +57,7 @@ namespace GAPI {
     Tile8   *curTile;
 #ifdef OL_MAGGIE
     bool    magColored;                  // current mesh range is flat-coloured (u = palette index)
-    bool    magAffine;                   // current polygon walks plain u, v (see magPrepare)
+    void    magFree();
 #endif
 
     uint8 ambient;
@@ -255,6 +255,9 @@ namespace GAPI {
         Mag::deinit();
     #endif
         delete[] swDepth;
+    #ifdef OL_MAGGIE
+        magFree();
+    #endif
         swVertices.clear();
         swIndices.clear();
         swTriangles.clear();
@@ -392,18 +395,12 @@ namespace GAPI {
     }
 
     inline void step(VertexSW &v, const VertexSW &d) {
-    #ifdef OL_MAGGIE
-        v.w += d.w;                      // 1/w for the perspective divide
-    #endif
         v.u += d.u;
         v.v += d.v;
         v.l += d.l;
     }
 
     inline void step(VertexSW &v, const VertexSW &d, int32 count) {
-    #ifdef OL_MAGGIE
-        v.w += d.w * count;
-    #endif
         v.u += d.u * count;
         v.v += d.v * count;
         v.l += d.l * count;
@@ -416,80 +413,6 @@ namespace GAPI {
     };
 
     void drawLine(const VertexSW &L, const VertexSW &R, int32 y) {
-    #ifdef OL_MAGGIE
-        {
-            int32 xa = L.x >> 16;
-            int32 x1 = xa;
-            int32 x2 = R.x >> 16;
-            int32 f = x2 - x1;
-            if (f <= 0) return;
-            float rf = f < 1024 ? Mag::rcp[f] : 1.0f / float(f);
-            if (magAffine) {             // plain u, v (magPrepare)
-                int32 u = L.u, v = L.v;
-                int32 du = int32(float(R.u - L.u) * rf), dv = int32(float(R.v - L.v) * rf);
-                int32 lL = Mag::shading ? Mag::rowToLight(L.l >> 3) : 0xFFFF;
-                int32 lR = Mag::shading ? Mag::rowToLight(R.l >> 3) : 0xFFFF;
-                int32 dl = int32(float(lR - lL) * rf);
-                int32 z  = L.z;
-                int32 dz = Mag::zOn ? int32(float(R.z - L.z) * rf) : 0;
-                if (x1 < swClipRect.x) {
-                    int32 k = swClipRect.x - x1;
-                    u += du * k; v += dv * k; lL += dl * k; z += dz * k;
-                    x1 = swClipRect.x;
-                }
-                if (x2 > swClipRect.z) x2 = swClipRect.z;
-                if (x2 <= x1) return;
-                if (magColored) Mag::bindFlat(L.u >> 16);
-                Mag::depthMode();
-                int32 offset = y * Core::width + x1;
-                Mag::span(swColor + offset, x2 - x1, u, v, du, dv, lL, dl, offset, uint32(z) << 1, dz << 1);
-                return;
-            }
-            // u/w, v/w, 1/w across the span (perspective form, see projectPush)
-            float qL = float(L.w), uqL = float(L.u), vqL = float(L.v);
-            float dq = (float(R.w) - qL) * rf, duq = (float(R.u) - uqL) * rf, dvq = (float(R.v) - vqL) * rf;
-            int32 lL = Mag::shading ? Mag::rowToLight(L.l >> 3) : 0xFFFF;
-            int32 lR = Mag::shading ? Mag::rowToLight(R.l >> 3) : 0xFFFF;
-            int32 dl = int32(float(lR - lL) * rf);
-            int32 z  = L.z;              // depth << 15
-            int32 dz = Mag::zOn ? int32(float(R.z - L.z) * rf) : 0;
-            if (x1 < swClipRect.x) {
-                int32 k = swClipRect.x - x1;
-                lL += dl * k; z += dz * k;
-                x1 = swClipRect.x;
-            }
-            if (x2 > swClipRect.z) x2 = swClipRect.z;
-            if (x2 <= x1) return;
-            if (magColored) Mag::bindFlat(int32(uqL / max(qL, 1.0f) + 0.5f));   // U/Q = palette index
-            Mag::depthMode();
-            int32 offset = y * Core::width + x1;
-            // pieces of at most MAG_PERSP_STEP pixels, affine inside; one piece when perspective is off
-            // or 1/w hardly changes along the span (then exact endpoints are as good)
-            float t = float(x1 - xa), te = float(x2 - xa);
-            float q0 = qL + dq * t, qe = qL + dq * te;
-            int32 step = 4096;
-            if (Mag::perspective) {
-                float qa = q0 < qe ? q0 : qe, qb = q0 < qe ? qe : q0;
-                if (qb > qa * MAG_PERSP_RATIO) step = MAG_PERSP_STEP;
-            }
-            float r0 = 65536.0f / q0;
-            float u0 = (uqL + duq * t) * r0, v0 = (vqL + dvq * t) * r0;
-            for (int32 xs = x1; xs < x2; ) {
-                int32 xe = min(xs + step, x2);
-                int32 n = xe - xs;
-                float tn = float(xe - xa);
-                float r1 = 65536.0f / (xe == x2 ? qe : qL + dq * tn);
-                float u1 = (uqL + duq * tn) * r1, v1 = (vqL + dvq * tn) * r1;
-                float rn = n < 1024 ? Mag::rcp[n] : 1.0f / float(n);
-                Mag::span(swColor + offset, n, int32(u0), int32(v0), int32((u1 - u0) * rn), int32((v1 - v0) * rn),
-                          lL, dl, offset, uint32(z) << 1, dz << 1);
-                lL += dl * n; z += dz * n; offset += n;
-                u0 = u1; v0 = v1;
-                xs = xe;
-            }
-            return;
-        }
-    #endif
         int32 x1 = L.x >> 16;
         int32 x2 = R.x >> 16;
 
@@ -583,29 +506,6 @@ namespace GAPI {
         }
     }
 
-#ifdef OL_MAGGIE
-    // Only polygons whose 1/w varies noticeably get perspective-correct spans: their vertices are
-    // converted to u/w, v/w (two multiplies each); the rest walk plain u, v as before.
-
-    inline void magPrepare(VertexSW **v, VertexSW *tmp, int count) {
-        int32 qa = v[0]->w, qb = v[0]->w;
-        for (int i = 1; i < count; i++) {
-            if (v[i]->w < qa) qa = v[i]->w;
-            if (v[i]->w > qb) qb = v[i]->w;
-        }
-        magAffine = !Mag::perspective || float(qb) <= float(qa) * MAG_PERSP_RATIO;
-        if (magAffine) return;
-        // perspective form: U = u * 1024 / w = u * Q / 65536, interpolated linearly with Q
-        for (int i = 0; i < count; i++) {
-            tmp[i] = *v[i];
-            float q = float(v[i]->w) * (1.0f / 65536.0f);
-            tmp[i].u = int32(float(v[i]->u) * q);
-            tmp[i].v = int32(float(v[i]->v) * q);
-            v[i] = tmp + i;
-        }
-    }
-#endif
-
     void drawTriangle(Index *indices) {
     /*
              t
@@ -636,11 +536,6 @@ namespace GAPI {
         if (t->x > cx2 && m->x > cx2 && b->x > cx2)
             return;
 
-    #ifdef OL_MAGGIE
-        VertexSW magTmp[3], *magV[3] = { t, m, b };
-        magPrepare(magV, magTmp, 3);
-        t = magV[0]; m = magV[1]; b = magV[2];
-    #endif
         sortVertices(t, m, b);
 
         if (b->y < swClipRect.y || t->y > swClipRect.w)
@@ -690,11 +585,6 @@ namespace GAPI {
         if (t->x > cx2 && m->x > cx2 && o->x > cx2 && b->x > cx2)
             return;
 
-    #ifdef OL_MAGGIE
-        VertexSW magTmp[4], *magV[4] = { t, m, b, o };
-        magPrepare(magV, magTmp, 4);
-        t = magV[0]; m = magV[1]; b = magV[2]; o = magV[3];
-    #endif
         sortVertices(t, m, b, o);
 
         if (b->y < swClipRect.y || t->y > swClipRect.w)
@@ -774,21 +664,10 @@ namespace GAPI {
         VertexSW r;
         r.x = int32(x) << 16;
         r.y = int32(y);
-    #ifdef OL_MAGGIE
-        r.z = int32(clamp(z, 0.0f, 1.0f) * 65535.0f) << 15;
-    #else
         r.z = uint32(clamp(z, 0.0f, 1.0f) * 65535.0f) << 16;
-    #endif
-    #ifdef OL_MAGGIE
-        // w holds Q = 2^26 / w (w >= 16) for perspective-correct texturing (see magPrepare)
-        r.w = int32(67108864.0f * (c.w > 16.0f ? invw : 1.0f / 16.0f));
-        r.u = u;
-        r.v = v;
-    #else
         r.w = int32(c.w) << 16;
         r.u = u;
         r.v = v;
-    #endif
         r.l = l;
         swIndices.push(swVertices.push(r));
     }
@@ -928,11 +807,7 @@ namespace GAPI {
             VertexSW result;
             result.x = int32(c.x) << 16;
             result.y = int32(c.y);
-        #ifdef OL_MAGGIE
-            result.z = int32(clamp(c.z, 0.0f, 1.0f) * 65535.0f) << 15;   // 31 bits: edge stepping is signed
-        #else
             result.z = uint32(clamp(c.z, 0.0f, 1.0f) * 65535.0f) << 16;
-        #endif
             result.w = int32(c.w);
 
             if (colored) {
@@ -971,12 +846,20 @@ namespace GAPI {
         }
     }
 
+#ifdef OL_MAGGIE
+    #include "platform/amiga/maggie_raster.h"
+#endif
+
     void DIP(Mesh *mesh, const MeshRange &range) {
         if (curTile == NULL) {
             //uint32 *tex = (uint32*)Core::active.textures[0]->memory; // TODO
             return;
         }
 
+    #ifdef OL_MAGGIE
+        if (MAG_STAGE(4)) return;
+        magDIP(mesh->iBuffer, mesh->vBuffer, range.iStart, range.iCount, range.vStart);
+    #else
         transformLights();
 
         bool colored = transform(mesh->iBuffer, mesh->vBuffer, range.iStart, range.iCount, range.vStart);
@@ -987,14 +870,6 @@ namespace GAPI {
             curTile = (Tile8*)swGradient;
         }
 
-    #ifdef OL_MAGGIE
-        magColored = colored;
-        if (!colored && !Mag::bindTile(oldTile)) {
-            curTile = oldTile;
-            return;
-        }
-    #endif
-
         for (int i = 0; i < swQuads.length; i++) {
             drawQuad(&swIndices[swQuads[i]]);
         }
@@ -1004,6 +879,7 @@ namespace GAPI {
         }
 
         curTile = oldTile;
+    #endif
     }
 
     void initPalette(Color24 *palette, uint8 *lightmap) {

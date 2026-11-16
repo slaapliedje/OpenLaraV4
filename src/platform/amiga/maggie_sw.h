@@ -138,6 +138,7 @@ namespace Mag {
     uint8   *whiteMem, *whiteTex;        // 32x32 white: flat-coloured faces
     uint8   *sink;                       // never freed (see hwSink in the fixed-engine port)
     float    rcp[1024];                  // 1/n for span deltas
+    uint32   rcpi[1024];                 // 65536/n
 
     uint8   *curTex;
     uint16   curTexSize, curMode;
@@ -147,6 +148,19 @@ namespace Mag {
 
     // depth buffer: the software renderer has none (draw order only); Maggie tests and writes 16-bit
     // depth per pixel, smaller = nearer. Values are the engine's z/w * 65535, linear in screen space.
+    // Profiling build (-DOL_PROFILE, ./build.sh mag prof): ENV:OLDBG=n stops the renderer early at
+    // stage n - 4 no draw calls, 5 after the corner transform, 6 before lighting, 1 before
+    // rasterising, 2 before the span registers, 3 no dynamic lights - and counts are printed at exit.
+    // Time the same off-screen frames at each stage: the differences are the stage costs.
+#ifdef OL_PROFILE
+    int      dbg = 0;
+    unsigned cnt[8];             // polygons, corners, drawn, spans, pixels
+    #define MAG_STAGE(n)   (Mag::dbg == (n))
+    #define MAG_COUNT(i, n) (Mag::cnt[i] += (n))
+#else
+    #define MAG_STAGE(n)   false
+    #define MAG_COUNT(i, n)
+#endif
     bool     perspective = true;         // F6 toggles: spans split into perspective-correct pieces
     #define  MAG_PERSP_STEP 64           // pixels per affine piece
     #define  MAG_PERSP_RATIO 1.3f        // 1/w varying less than this across a polygon/span: affine
@@ -225,6 +239,8 @@ namespace Mag {
     bool init() {
         rcp[0] = 0.0f;
         for (int i = 1; i < 1024; i++) rcp[i] = 1.0f / float(i);
+        rcpi[0] = 0;
+        for (int i = 1; i < 1024; i++) rcpi[i] = 65536 / i;
         if (!sink) {
             uint8 *raw = (uint8*)osMagAlloc(128 + 32);
             if (raw) sink = (uint8*)((uint32(raw) + 31) & ~31U);
@@ -319,7 +335,8 @@ namespace Mag {
         if (tiles && palValid && uploadedTiles != tiles) uploadPages();
         int t = int(tile - tiles);
         if (t < 0 || t >= pageCount || !pageTex[t]) return false;
-        texture(alphaTest ? pageTexA[t] : pageTex[t], 8);
+        // 2D draws (depth test off: text, bars, pictures) never set alpha test but rely on index 0
+        texture(alphaTest || !zTest ? pageTexA[t] : pageTex[t], 8);
         curFlat = false;
         colour(tint);
         return true;
@@ -340,8 +357,10 @@ namespace Mag {
     // One span. u/v in 16.16 texels of a 256 page (= Maggie 8:24 normalised), l = light row 16.16.
     // Maggie holds one span: work everything out first, then write the registers in one burst
     // ending with startLength; the CPU walks the next scanline while Maggie draws this one.
-    inline void span(uint16 *dst, int32 len, int32 u, int32 v, int32 du, int32 dv, int32 L, int32 dl,
+    __attribute__((always_inline)) inline void span(uint16 *dst, int32 len, int32 u, int32 v, int32 du, int32 dv, int32 L, int32 dl,
                      int32 offset = 0, uint32 z = 0, int32 dz = 0) {
+        MAG_COUNT(3, 1); MAG_COUNT(4, len);
+        if (MAG_STAGE(2)) return;
         volatile Regs *m = MAG_REGS;     // first write waits for the previous span
         if (zSpan) { m->depthDest = zbuf + offset; m->depthStart = z; m->depthDelta = dz; }
         m->pixDest = dst;

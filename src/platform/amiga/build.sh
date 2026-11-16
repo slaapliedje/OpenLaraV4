@@ -3,6 +3,7 @@
 #   ./build.sh           -> OpenLara          software renderer
 #   ./build.sh mag       -> OpenLaraMag       spans drawn by Maggie (SAGA texture unit)
 #   ./build.sh mag emu   -> OpenLaraMagEmu    Maggie build with a software Maggie, for emu.sh (Amiberry)
+#   ./build.sh mag prof  -> OpenLaraMagProf   stage profiling (ENV:OLDBG, see maggie_sw.h)
 # Needs bebbo m68k-amigaos gcc 6.5. C code as 68060 (-m68080 traps on core 12846).
 #   -fbbb=- turns off bebbo gcc's extra optimiser: it miscompiles (base register reused after a postincrement)
 set -e
@@ -15,6 +16,7 @@ for a in "$@"; do
   case $a in
     mag) FLAGS="$FLAGS -DOL_MAGGIE"; OUT=${OUT}Mag; B=${B}-mag ;;
     emu) FLAGS="$FLAGS -DOL_EMU"; OUT=${OUT}Emu; B=${B}-emu ;;
+    prof) FLAGS="$FLAGS -DOL_PROFILE"; OUT=${OUT}Prof; B=${B}-prof ;;
     *) echo "unknown option $a"; exit 1 ;;
   esac
 done

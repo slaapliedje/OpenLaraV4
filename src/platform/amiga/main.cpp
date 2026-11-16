@@ -43,8 +43,9 @@ static ULONG sagaOld = 0;
 #define SAGA_GFXADDR   ((volatile ULONG*)0xDFF1EC)
 #define SAGA_GFXADDR_R ((volatile ULONG*)0xDFE1EC)
 
-#define SCREEN_WIDTH  320
-#define SCREEN_HEIGHT 240
+static int scrW = 320, scrH = 240;       // ENV:OLRES ("640x480"): any 16-bit RTG mode of exactly that size
+#define SCREEN_WIDTH  scrW
+#define SCREEN_HEIGHT scrH
 
 // --- OS hooks the engine needs ---------------------------------------------------------------
 static struct EClockVal eclock;
@@ -305,7 +306,7 @@ static bool videoInit()
     if (!CyberGfxBase) { printf("no cybergraphics.library\n"); return false; }
     ULONG modeID = BestCModeIDTags(CYBRBIDTG_NominalWidth, SCREEN_WIDTH, CYBRBIDTG_NominalHeight, SCREEN_HEIGHT,
                                    CYBRBIDTG_Depth, 16, TAG_DONE);
-    if (modeID == (ULONG)INVALID_ID) { printf("no 320x240x16 mode\n"); return false; }
+    if (modeID == (ULONG)INVALID_ID) { printf("no %dx%dx16 mode\n", SCREEN_WIDTH, SCREEN_HEIGHT); return false; }
     screen = OpenScreenTags(NULL, SA_DisplayID, modeID, SA_Depth, 16, SA_ShowTitle, FALSE, SA_Quiet, TRUE,
                             SA_Type, CUSTOMSCREEN, TAG_DONE);
     if (!screen) { printf("OpenScreen failed\n"); return false; }
@@ -316,7 +317,10 @@ static bool videoInit()
     APTR lock = LockBitMapTags(screen->RastPort.BitMap, LBMI_BASEADDRESS, (ULONG)&base, LBMI_BYTESPERROW, (ULONG)&bpr, TAG_DONE);
     if (lock) UnLockBitMap(lock);
     printf("mode %08lx screen %dx%d bpr %lu base %08lx shown %08lx\n", modeID, screen->Width, screen->Height, bpr, base, *SAGA_GFXADDR_R);
-    if (bpr != SCREEN_WIDTH * 2 || screen->Width != SCREEN_WIDTH) { printf("unexpected screen layout\n"); return false; }
+    if (bpr != (ULONG)SCREEN_WIDTH * 2 || screen->Width != SCREEN_WIDTH || screen->Height != SCREEN_HEIGHT) {
+        printf("no %dx%d mode: the nearest is %dx%d (ENV:OLRES)\n", SCREEN_WIDTH, SCREEN_HEIGHT, screen->Width, screen->Height);
+        return false;
+    }
 
     // two frame buffers of our own, shown by pointing SAGA at them (P96 screen buffers flicker on vampiregfx)
     ULONG size = (SCREEN_WIDTH * 2 * screen->Height + 63) & ~63UL;
@@ -483,6 +487,17 @@ __attribute__((noinline)) static int olMain()
     // (Workbench/some shells start programs at 1), so run at 0 and share the CPU with them
     SetTaskPri(FindTask(NULL), 0);
 
+    {
+        char res[16];
+        struct Process *me = (struct Process*)FindTask(NULL);
+        APTR oldWin = me->pr_WindowPtr;
+        me->pr_WindowPtr = (APTR)-1;     // no "insert volume ENV:" requester
+        if (GetVar((STRPTR)"OLRES", (STRPTR)res, sizeof(res), 0) > 0) {
+            int w = 0, h = 0;
+            if (sscanf(res, "%dx%d", &w, &h) == 2 && w >= 160 && w <= 1280 && h >= 120 && h <= 1024) { scrW = w & ~1; scrH = h; }
+        }
+        me->pr_WindowPtr = oldWin;
+    }
     if (headlessFrames) {
         fbMem = (UBYTE*)AllocVec(SCREEN_WIDTH * 2 * SCREEN_HEIGHT + 64, MEMF_ANY | MEMF_CLEAR);
         if (!fbMem) return 20;
@@ -516,6 +531,9 @@ __attribute__((noinline)) static int olMain()
     if (GetVar((STRPTR)"OLNOREVERB", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Core::settings.audio.reverb = false;
     bool sound = !headlessFrames && !noSound && sndStart();
 #ifdef OL_MAGGIE
+#ifdef OL_PROFILE
+    if (GetVar((STRPTR)"OLDBG", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::dbg = atoi(envTmp);
+#endif
     if (GetVar((STRPTR)"OLNOZ", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::zEnabled = false;   // ENV:OLNOZ: no depth buffer
     if (GetVar((STRPTR)"OLNOPERSP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::perspective = false; // ENV:OLNOPERSP
     if (GetVar((STRPTR)"OLNOBILINEAR", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::bilinear = false; // ENV:OLNOBILINEAR
@@ -639,6 +657,9 @@ __attribute__((noinline)) static int olMain()
         }
     }
 
+#ifdef OL_PROFILE
+    printf("CNT polys %u corners %u drawn %u spans %u pixels %u loops %d\n", Mag::cnt[0], Mag::cnt[1], Mag::cnt[2], Mag::cnt[3], Mag::cnt[4], loopFrame);
+#endif
     if (sound) sndStop();
     if (sndDump) fclose(sndDump);
     if (out) fclose(out);
