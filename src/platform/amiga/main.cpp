@@ -98,14 +98,18 @@ struct OLAHIRequest {
 #define SND_DUMP_FRAMES 1024             // headless dump: same size (the mixer keeps its first size)
 static volatile bool sndQuit = false;
 static volatile bool sndRunning = false;
+static volatile ULONG sndMixTime = 0, sndMixCount = 0;   // Sound::fill time (EClock ticks) / calls, for the profile
 static volatile int  sndOpenError = 1;   // set by the sound task: 0 = AHI open, else OpenDevice's error
 static int sndUnit = OL_AHI_DEFAULT_UNIT; // ENV:OLAHIUNIT
 static void sndStop();
 static struct Task *sndMainTask = NULL;
 static BYTE sndDoneSig = -1;
 
+extern "C" void olSndTrapHandler();
+
 static void sndTask()
 {
+    FindTask(NULL)->tc_TrapCode = (APTR)olSndTrapHandler;
     struct MsgPort *port = CreateMsgPort();
     OLAHIRequest *req[2] = { NULL, NULL };
     Sound::Frame *buf[2] = { NULL, NULL };
@@ -127,8 +131,13 @@ static void sndTask()
         sndRunning = true;
         OLAHIRequest *link = NULL;
         int cur = 0;
+        struct EClockVal ev;
+        ElapsedTime(&ev);
         while (!sndQuit) {
+            ElapsedTime(&ev);
             Sound::fill(buf[cur], SND_FRAMES);
+            sndMixTime += ElapsedTime(&ev);      // 16.16 seconds
+            sndMixCount++;
             OLAHIRequest *r = req[cur];
             r->ahir_Std.io_Message.mn_Node.ln_Pri = 0;
             r->ahir_Std.io_Command = CMD_WRITE;
@@ -389,7 +398,17 @@ extern "C" {
     ULONG olTrapNum, olTrapPC, olTrapRegs[16];
     void olCrashed();
     void olTrapHandler();
+    void olSndCrashed();
+    void olSndTrapHandler();
 }
+// the sound task has its own handler (same frame handling, resumes in olSndCrashed)
+asm(".text\n.even\n.globl _olSndTrapHandler\n_olSndTrapHandler:\n"
+    "  movem.l d0-d7/a0-a6,_olTrapRegs\n"
+    "  move.l (sp)+,_olTrapNum\n"
+    "  move.l usp,a0\n  move.l a0,_olTrapRegs+60\n"
+    "  move.l 2(sp),_olTrapPC\n"
+    "  move.l #_olSndCrashed,2(sp)\n"
+    "  rte\n");
 asm(".text\n.even\n.globl _olTrapHandler\n_olTrapHandler:\n"
     "  movem.l d0-d7/a0-a6,_olTrapRegs\n"
     "  move.l (sp)+,_olTrapNum\n"          // exec pushes the exception number
@@ -402,15 +421,38 @@ static void videoFree();
 static void sndStop();
 int main();
 
+static int crashReport(const char *who, char *buf)
+{
+    int n = sprintf(buf, "CRASH (%s): exception %lu at PC %08lx = main%+ld\n", who, olTrapNum, olTrapPC, (long)(olTrapPC - (ULONG)main));
+    for (int i = 0; i < 16; i++)
+        n += sprintf(buf + n, "%s%d=%08lx%s", i < 8 ? "d" : "a", i & 7, olTrapRegs[i], (i & 7) == 7 ? "\n" : " ");
+    // RAM: for a quick look, PROGDIR: so it survives a reset
+    static const char *files[] = { "RAM:olcrash.txt", "PROGDIR:olcrash.txt" };
+    for (int i = 0; i < 2; i++) {
+        BPTR f = Open((STRPTR)files[i], MODE_NEWFILE);
+        if (f) { Write(f, buf, n); Close(f); }
+    }
+    return n;
+}
+
+static volatile bool sndCrashed = false;
+
+void olSndCrashed()                      // the sound task crashed: report, then end the task
+{
+    char buf[512];
+    crashReport("sound task", buf);
+    sndCrashed = true;
+    sndRunning = false;
+    Forbid();
+    Signal(sndMainTask, 1UL << sndDoneSig);
+    Wait(0);                             // never returns: the task stays parked, the game runs on silently
+}
+
 void olCrashed()
 {
     char buf[512];
-    int n = sprintf(buf, "CRASH: exception %lu at PC %08lx = main%+ld\n", olTrapNum, olTrapPC, (long)(olTrapPC - (ULONG)main));
-    for (int i = 0; i < 16; i++)
-        n += sprintf(buf + n, "%s%d=%08lx%s", i < 8 ? "d" : "a", i & 7, olTrapRegs[i], (i & 7) == 7 ? "\n" : " ");
+    crashReport("game", buf);
     printf("%s", buf);
-    BPTR f = Open((STRPTR)"RAM:olcrash.txt", MODE_NEWFILE);
-    if (f) { Write(f, buf, n); Close(f); }
     sndStop();
     videoFree();
     Exit(20);
@@ -437,6 +479,9 @@ __attribute__((noinline)) static int olMain()
     int headlessFrames = __argc > 3 ? atoi(__argv[2]) : 0;
     const char *outPrefix = __argc > 3 ? __argv[3] : NULL;
     FindTask(NULL)->tc_TrapCode = (APTR)olTrapHandler;
+    // the game loop never waits: above priority 0 it starves the network stack, sshd and rsh
+    // (Workbench/some shells start programs at 1), so run at 0 and share the CPU with them
+    SetTaskPri(FindTask(NULL), 0);
 
     if (headlessFrames) {
         fbMem = (UBYTE*)AllocVec(SCREEN_WIDTH * 2 * SCREEN_HEIGHT + 64, MEMF_ANY | MEMF_CLEAR);
@@ -468,6 +513,7 @@ __attribute__((noinline)) static int olMain()
     me->pr_WindowPtr = (APTR)-1;         // no "insert volume ENV:" requester where ENV: is missing
     bool noSound = GetVar((STRPTR)"OLNOSOUND", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0;
     if (GetVar((STRPTR)"OLAHIUNIT", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) sndUnit = atoi(envTmp);
+    if (GetVar((STRPTR)"OLNOREVERB", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Core::settings.audio.reverb = false;
     bool sound = !headlessFrames && !noSound && sndStart();
 #ifdef OL_MAGGIE
     if (GetVar((STRPTR)"OLNOZ", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::zEnabled = false;   // ENV:OLNOZ: no depth buffer
@@ -568,12 +614,27 @@ __attribute__((noinline)) static int olMain()
         if (frames % 50 == 49) {          // remote quit (tools: RAM:olquit)
             BPTR l = Lock((STRPTR)"RAM:olquit", ACCESS_READ);
             if (l) { UnLock(l); DeleteFile((STRPTR)"RAM:olquit"); break; }
+            // remote screenshot: RAM:olshot -> RAM:olshot-NNNN.raw (the frame on screen, 320x240 RGB565)
+            l = Lock((STRPTR)"RAM:olshot", ACCESS_READ);
+            if (l) {
+                UnLock(l);
+                DeleteFile((STRPTR)"RAM:olshot");
+                static int shotNum = 0;
+                const uint16 *shown = headlessFrames ? fb : fbBuf[(fbBack + FB_COUNT - 1) % FB_COUNT];
+                saveFrame("RAM:olshot", shotNum++, shown);
+            }
         }
         if (++frames == 100) {
             int all = osGetTimeMS() - tStart;
-            printf("100 frames: %d ms/frame (%d.%d fps)  update %d.%d ms  render %d.%d ms\n",
+            printf("100 frames: %d ms/frame (%d.%d fps)  update %d.%d ms  render %d.%d ms",
                    all / 100, 100000 / (all ? all : 1), (1000000 / (all ? all : 1)) % 10,
                    tUpd / 100, (tUpd / 10) % 10, tRen / 100, (tRen / 10) % 10);
+            if (sndMixCount) {               // mixer cost per 1024-frame (23.2 ms) buffer
+                ULONG us = (ULONG)(((uint64)sndMixTime * 1000000) >> 16) / sndMixCount;
+                printf("  mix %lu.%lu ms / 23.2 ms buffer", us / 1000, (us / 100) % 10);
+                sndMixTime = sndMixCount = 0;
+            }
+            printf("\n");
             frames = 0; tUpd = tRen = 0; tStart = osGetTimeMS();
         }
     }
