@@ -173,6 +173,7 @@ namespace Mag {
     bool     zSpan;                      // current spans test/write depth
     bool     alphaTest;                  // GAPI::setAlphaTest: transparent texels (alpha page)
     bool     bilinear = true;            // F8 toggles: filtered textures on 3D faces
+    bool     normalCull = true;          // hardware back end: back faces dropped by their normal (ENV:OLNONCULL)
     bool     mipmaps = true;             // F9 toggles (hardware back end): Maggie's automatic mip level
     bool     curFlat;                    // the bound texture is the white one (flat colour)
 

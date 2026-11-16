@@ -479,8 +479,22 @@ namespace GAPI {
         return uint32((r * 255 / best) << 16) | uint32((g * 255 / best) << 8) | uint32(b * 255 / best);
     }
 
+    bool magDbgCulled = false;
+
+    // transformed positions under the current matrix, by object-space position
+    #define MAG_XFORM_SIZE 2048
+    struct MagXform {
+        uint32 key1, key2;               // x, y / z, stamp
+        float  x, y, w;                  // screen space times w
+        int32  code;
+    } magXform[MAG_XFORM_SIZE];
+    uint16 magXformStamp = 0;
+    mat4   magXformMatrix;
+    short4 magXformClip;
+
     void DIP(Mesh *mesh, const MeshRange &range) {
         if (MAG_STAGE(4)) return;
+        MAG_COUNT(7, 1);
         const Index  *indices  = mesh->iBuffer;
         const Vertex *vertices = mesh->vBuffer;
         const int iStart = range.iStart, iCount = range.iCount, vStart = range.vStart;
@@ -534,7 +548,7 @@ namespace GAPI {
         const bool lit = lightsCount > 0 && !MAG_STAGE(3);
         if (lit) transformLights();
 
-        const float screenW = float(Core::width), screenH = float(Core::height);
+        const float clipL = float(swClipRect.x), clipT = float(swClipRect.y), clipR = float(swClipRect.z), clipB = float(swClipRect.w);
         // orthographic projections (UI, 2D) have w = 1 everywhere: only perspective ones get the near plane
         const bool ortho = Core::mProj.e33 == 1.0f;
         const float nearW = ortho ? 0.0f : SW_NEAR;
@@ -542,6 +556,24 @@ namespace GAPI {
         // which way round is the front: the engine's default (cmFront) is clockwise on this screen
         const bool cullNone = cullMode == 0, flip = cullMode == RS_CULL_BACK;
 
+        // Faces whose corners share one normal carry their face normal (room geometry): those facing
+        // away from the camera are dropped before any corner is transformed.
+        const bool normalCull = !ortho && !cullNone && Mag::normalCull;
+        vec3 camPos(0.0f);
+        if (normalCull) camPos = mModel.inverseOrtho() * Core::viewPos.xyz();
+        const float camX = camPos.x, camY = camPos.y, camZ = camPos.z;
+        const float cullSide = flip ? -1.0f : 1.0f;
+
+        // a new stamp empties the transform cache: whenever the matrix changes (a room's draw calls,
+        // one per texture tile, share it and many of their corners)
+        if (magXformStamp == 0 || memcmp(&m, &magXformMatrix, sizeof(mat4)) != 0 || memcmp(&swClipRect, &magXformClip, sizeof(short4)) != 0) {
+            magXformMatrix = m;
+            magXformClip = swClipRect;
+            if (++magXformStamp == 0) { memset(magXform, 0, sizeof(magXform)); magXformStamp = 1; }
+        }
+        const uint32 stamp = magXformStamp;
+
+        if (MAG_STAGE(8)) return;
         MagVtx  *vo = magVtxBuf;
         MagPrim *po = magPrimBuf;
 
@@ -558,22 +590,48 @@ namespace GAPI {
             i += isTriangle ? 3 : 6;
             if (i > iCount) break;
             if (!isTriangle) vx[3] = vertices + vStart + idx[5];
-            MAG_COUNT(0, 1); MAG_COUNT(1, count);
+            MAG_COUNT(0, 1);
+            magDbgCulled = false;
+            if (MAG_STAGE(9)) continue;
+            if (normalCull) {
+                const short4 &n = vx[0]->normal, &n1 = vx[1]->normal, &n2 = vx[2]->normal;
+                if (n.x == n1.x && n.y == n1.y && n.z == n1.z && n.x == n2.x && n.y == n2.y && n.z == n2.z &&
+                    abs(n.x) + abs(n.y) + abs(n.z) > 30000) {
+                    float d = (float(n.x) * (camX - float(vx[0]->coord.x)) + float(n.y) * (camY - float(vx[0]->coord.y)) +
+                               float(n.z) * (camZ - float(vx[0]->coord.z))) * cullSide;
+                    // more than 4 units behind the face's plane (the normal has length 32767)
+                    if (magBits(d + 131068.0f) < 0) { if (!MAG_STAGE(7)) continue; magDbgCulled = true; }
+                }
+            }
+            MAG_COUNT(1, count);
 
             float cx[4], cy[4], cw[4];
             int32 behind = 0, outside = 15, tooFar = 0;
             for (int k = 0; k < count; k++) {
-                float x = float(vx[k]->coord.x), y = float(vx[k]->coord.y), z = float(vx[k]->coord.z);
-                float w = m.e30 * x + m.e31 * y + m.e32 * z + m.e33;
-                float sx = m.e00 * x + m.e01 * y + m.e02 * z + m.e03;
-                float sy = m.e10 * x + m.e11 * y + m.e12 * z + m.e13;
-                cx[k] = sx; cy[k] = sy; cw[k] = w;
-                int32 wb = magBits(w);
-                tooFar |= wb > farBits;
-                behind += wb < nearBits;
-                // left of, right of, above, below the screen (sign bits; valid for w > 0)
-                outside &= (uint32(magBits(sx)) >> 31) | ((uint32(magBits(screenW * w - sx)) >> 31) << 1) |
-                           ((uint32(magBits(sy)) >> 31) << 2) | ((uint32(magBits(screenH * w - sy)) >> 31) << 3);
+                // neighbouring faces repeat the same positions: look the corner up before transforming it
+                const short4 &c = vx[k]->coord;
+                const uint32 key1 = (uint32(uint16(c.x)) << 16) | uint16(c.y), key2 = (uint32(uint16(c.z)) << 16) | stamp;
+                uint32 h = uint32(c.x * 73 + c.y * 151 + c.z * 283);
+                MagXform &e = magXform[(h ^ (h >> 9)) & (MAG_XFORM_SIZE - 1)];
+                if (e.key1 != key1 || e.key2 != key2) {
+                    e.key1 = key1; e.key2 = key2;
+                    float x = float(c.x), y = float(c.y), z = float(c.z);
+                    float w = m.e30 * x + m.e31 * y + m.e32 * z + m.e33;
+                    float sx = m.e00 * x + m.e01 * y + m.e02 * z + m.e03;
+                    float sy = m.e10 * x + m.e11 * y + m.e12 * z + m.e13;
+                    e.x = sx; e.y = sy; e.w = w;
+                    int32 wb = magBits(w);
+                    // bits 0..3: left of, right of, above, below the scissor rectangle - the portal a room is
+                    // seen through (sign bits; valid for w > 0),
+                    // bit 4 too far, bit 5 behind the near plane
+                    e.code = (uint32(magBits(sx - clipL * w)) >> 31) | ((uint32(magBits(clipR * w - sx)) >> 31) << 1) |
+                             ((uint32(magBits(sy - clipT * w)) >> 31) << 2) | ((uint32(magBits(clipB * w - sy)) >> 31) << 3) |
+                             (wb > farBits ? 16 : 0) | (wb < nearBits ? 32 : 0);
+                }
+                cx[k] = e.x; cy[k] = e.y; cw[k] = e.w;
+                outside &= e.code;
+                tooFar |= e.code & 16;
+                behind += e.code >> 5;
             }
             if ((tooFar && !ortho) || behind == count) continue;
             if (MAG_STAGE(5)) continue;
@@ -608,6 +666,7 @@ namespace GAPI {
                     if (magBits(area - MAG_MIN_AREA) < 0) continue;      // facing away, or nothing to draw
                 } else if (magBits(area - MAG_MIN_AREA) < 0 && magBits(area2 - MAG_MIN_AREA) < 0) continue;
             }
+            if (magDbgCulled && !behind) MAG_COUNT(6, 1);     // profiling: the normal test was wrong
             if (MAG_STAGE(6)) continue;
             // no alpha blending in Maggie: mostly transparent faces (screen fades, faint overlays) are
             // left out, the rest drawn solid
@@ -619,6 +678,7 @@ namespace GAPI {
             for (int k = 0; k < count; k++) {
                 const Vertex &v = *vx[k];
                 int32 f = lit ? magLightFactor(v) : 256;
+                if (lit) MAG_COUNT(5, lightsCount);
                 if (!ortho) f = (f * magFog(cw[k])) >> 8;
                 int32 r = v.light.x, g = v.light.y, b = v.light.z;
                 if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
