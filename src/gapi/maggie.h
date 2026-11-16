@@ -9,7 +9,7 @@
 //   colour     vertex colour x light: a per-polygon RGB tint and Maggie's per-pixel intensity
 //   blending   add and multiply (Maggie's blend modes); alpha blending is drawn alpha-tested
 //   depth      16-bit z-buffer, test and write separately (transparent faces don't write)
-//   filtering  bilinear (F8), perspective-correct spans (F6)
+//   filtering  bilinear (F8), mipmaps (F9), perspective-correct spans (F6)
 // The CPU transforms, lights and clips; platform/amiga/maggie_raster.h walks the polygons with
 // subpixel accuracy and hands Maggie one span per line.
 
@@ -141,16 +141,44 @@ namespace GAPI {
             bool anyAlpha = false;
             for (int i = 0, n = size * size; i < n && !anyAlpha; i++) anyAlpha = src[i * 4 + 3] < 128;
 
-            int bytes = size * size / 2;
+            // DXT1 mip chain, level after level down to 32x32 (Maggie picks the level per span)
+            int bytes = 0;
+            for (int l = log2; l >= 5; l--) bytes += (1 << l) * (1 << l) / 2;
             if (!dxt) dxt = Mag::allocTex(bytes, &dxtMem);
-            if (dxt) Mag::encodeRGBA(src, size, size, dxt, false);
             if (anyAlpha) {
                 if (!dxtMemA) dxtA = Mag::allocTex(bytes, &dxtMemA);
-                if (dxtMemA && dxtA) Mag::encodeRGBA(src, size, size, dxtA, true); else dxtA = dxt;
+                if (!dxtMemA || !dxtA) { dxtA = dxt; anyAlpha = false; }
             } else {
                 if (dxtMemA) { osMagFree(dxtMemA); dxtMemA = NULL; }
                 dxtA = dxt;
             }
+            uint8 *level = NULL;             // the current level's RGBA when it is not src
+            const uint8 *cur = src;
+            int offset = 0;
+            for (int l = log2; l >= 5 && dxt; l--) {
+                int n = 1 << l;
+                Mag::encodeRGBA(cur, n, n, dxt + offset, false);
+                if (anyAlpha) Mag::encodeRGBA(cur, n, n, dxtA + offset, true);
+                offset += n * n / 2;
+                if (l == 5) break;
+                // half size: mean of the opaque texels of each 2x2, transparent if most are
+                int h = n >> 1;
+                uint8 *next = new uint8[h * h * 4];
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < h; x++) {
+                        const uint8 *q[4] = { cur + ((y * 2) * n + x * 2) * 4, cur + ((y * 2) * n + x * 2 + 1) * 4,
+                                              cur + ((y * 2 + 1) * n + x * 2) * 4, cur + ((y * 2 + 1) * n + x * 2 + 1) * 4 };
+                        int r = 0, g = 0, b = 0, k = 0;
+                        for (int i = 0; i < 4; i++) if (q[i][3] >= 128) { r += q[i][0]; g += q[i][1]; b += q[i][2]; k++; }
+                        uint8 *o = next + (y * h + x) * 4;
+                        if (k) { o[0] = uint8(r / k); o[1] = uint8(g / k); o[2] = uint8(b / k); } else { o[0] = q[0][0]; o[1] = q[0][1]; o[2] = q[0][2]; }
+                        o[3] = k >= 2 ? 255 : 0;
+                    }
+                delete[] level;
+                level = next;
+                cur = next;
+            }
+            delete[] level;
             delete[] tmp;
             osMagCacheFlush();
         }
@@ -298,7 +326,7 @@ namespace GAPI {
             Mag::sync();                 // a span still being drawn would land on the cleared frame
             memset(swColor, 0, Core::width * Core::height * sizeof(ColorSW));
         }
-        if (depth && Mag::zOn) {
+        if (depth && Mag::zOn && !Mag::zClean) {
             Mag::sync();
             Mag::clearDepth();
         }
@@ -368,7 +396,10 @@ namespace GAPI {
     }
 
     // per polygon: its colour multiply (the mode is set once per draw call)
-    #define MAG_PRIM_BEGIN(pr, a) Mag::colour((pr).tint)
+    // per polygon: its colour multiply, and the white texture for faces without one (tint bit 24)
+    uint8  *magDipTex;
+    uint16  magDipSize;
+    #define MAG_PRIM_BEGIN(pr, a) { if ((pr).tint >> 24) Mag::texture(Mag::whiteTex, 5); else Mag::texture(magDipTex, magDipSize); Mag::colour((pr).tint); }
 
     #include "platform/amiga/maggie_raster.h"
 
@@ -463,9 +494,11 @@ namespace GAPI {
         const bool needZ = Mag::zOn && depthTest;
         const bool flatDraw = vertices[vStart + indices[iStart]].color.w == 142;    // palette-coloured faces
         if (tex && tex->dxt && !flatDraw) {
-            Mag::texture(cutout || blendAdd || blendMul ? tex->dxtA : tex->dxt, uint16(tex->sizeLog2));
+            magDipTex = cutout || blendAdd || blendMul ? tex->dxtA : tex->dxt;
+            magDipSize = uint16(tex->sizeLog2) | (Mag::mipmaps && depthTest && tex->sizeLog2 > 5 ? 0x10 : 0);
         } else {
-            Mag::texture(Mag::whiteTex, 5);
+            magDipTex = Mag::whiteTex;
+            magDipSize = 5;
             tex = NULL;
         }
         // bilinear on everything in the 3D scene (the engine marks its atlas tiles "nearest"); 2D stays sharp
@@ -473,6 +506,9 @@ namespace GAPI {
         Mag::setMode(0x0004 | (filter ? 0x0001 : 0) | (needZ ? 0x0002 : 0) | (needZ && (!depthWrite || blendAdd || blendMul) ? 0x0008 : 0) |
                      (blendAdd ? 0x0040 : 0) | (blendMul ? 0x0080 : 0));
         const int32 uMul = tex ? tex->uMul : 0, vMul = tex ? tex->vMul : 0;
+        // Maggie's bilinear blends the texel at u with the next one: half a texel back puts the blend
+        // around the texel centres, and keeps a cell's last texel from mixing with its neighbour's
+        const int32 half = filter ? (1 << (23 - tex->sizeLog2)) : 0;
 
         if (magVtxCap < iCount * 2 + 16) {
             magVtxCap = iCount * 2 + 256;
@@ -573,6 +609,9 @@ namespace GAPI {
                 } else if (magBits(area - MAG_MIN_AREA) < 0 && magBits(area2 - MAG_MIN_AREA) < 0) continue;
             }
             if (MAG_STAGE(6)) continue;
+            // no alpha blending in Maggie: mostly transparent faces (screen fades, faint overlays) are
+            // left out, the rest drawn solid
+            if (blendMode == RS_BLEND_ALPHA && vx[0]->light.w < 128) continue;
 
             // colour: vertex light (x face colour for palette-coloured faces) x lighting x distance fade
             uint32 rgb[4];
@@ -585,14 +624,17 @@ namespace GAPI {
                 if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
                 rgb[k] = (uint32((r * f) >> 8) << 16) | (uint32((g * f) >> 8) << 8) | uint32((b * f) >> 8);
             }
-            const uint32 tint = magTint(rgb, count, l);
+            uint32 tint = magTint(rgb, count, l);
+            // all corners on one texel: a plain coloured face (UI bars and frames)
+            if (vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
+                vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y) tint |= 0x01000000;
 
             if (!behind) {
                 for (int k = 0; k < count; k++) {
                     const Vertex &v = *vx[k];
                     float z = 0.0f;
                     if (needZ) z = m.e20 * float(v.coord.x) + m.e21 * float(v.coord.y) + m.e22 * float(v.coord.z) + m.e23;
-                    magProject(vo[k], cx[k], cy[k], z, cw[k], iw[k], v.texCoord.x * uMul, v.texCoord.y * vMul, l[k]);
+                    magProject(vo[k], cx[k], cy[k], z, cw[k], iw[k], v.texCoord.x * uMul - half, v.texCoord.y * vMul - half, l[k]);
                 }
                 // clockwise for the rasteriser
                 MagVtx *a = vo, *b = vo + 1, *c = vo + 2, *d = vo + 3;
@@ -621,8 +663,8 @@ namespace GAPI {
                 const Vertex &v = *vx[k];
                 cv[k].x = cx[k]; cv[k].y = cy[k]; cv[k].w = cw[k];
                 cv[k].z = m.e20 * float(v.coord.x) + m.e21 * float(v.coord.y) + m.e22 * float(v.coord.z) + m.e23;
-                cv[k].u = v.texCoord.x * uMul;
-                cv[k].v = v.texCoord.y * vMul;
+                cv[k].u = v.texCoord.x * uMul - half;
+                cv[k].v = v.texCoord.y * vMul - half;
                 cv[k].l = l[k];
             }
             MagVtx *first = vo;

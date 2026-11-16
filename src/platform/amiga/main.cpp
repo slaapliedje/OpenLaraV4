@@ -275,6 +275,7 @@ static void pollInput()
             if (code == 0x56 && down) Mag::zEnabled = !Mag::zEnabled;   // F7: depth buffer on/off
             if (code == 0x55 && down) Mag::perspective = !Mag::perspective; // F6: perspective-correct texturing
             if (code == 0x57 && down) Mag::bilinear = !Mag::bilinear;       // F8: bilinear filtering
+            if (code == 0x58 && down) Mag::mipmaps = !Mag::mipmaps;         // F9: mipmaps (hardware back end)
         #endif
             InputKey k = rawToKey(code);
             if (k != ikNone) Input::setDown(k, down);
@@ -536,6 +537,7 @@ __attribute__((noinline)) static int olMain()
 #endif
     if (GetVar((STRPTR)"OLNOZ", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::zEnabled = false;   // ENV:OLNOZ: no depth buffer
     if (GetVar((STRPTR)"OLNOPERSP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::perspective = false; // ENV:OLNOPERSP
+    if (GetVar((STRPTR)"OLNOMIP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::mipmaps = false;         // ENV:OLNOMIP
     if (GetVar((STRPTR)"OLNOBILINEAR", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::bilinear = false; // ENV:OLNOBILINEAR
 #endif
 #ifdef SW_NEAR_CLIP

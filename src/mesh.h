@@ -16,6 +16,11 @@ enum CommonTexType {
 };
 
 TR::TextureInfo CommonTex[CTEX_MAX];
+
+// 0xAABBGGRR -> x = R ... w = A on either byte order (ubyte4::value is little-endian only)
+inline void setPacked(ubyte4 &v, uint32 c) {
+    v.x = uint8(c); v.y = uint8(c >> 8); v.z = uint8(c >> 16); v.w = uint8(c >> 24);
+}
 TR::TextureInfo &whiteRoom   = CommonTex[CTEX_WHITE_ROOM];
 TR::TextureInfo &whiteObject = CommonTex[CTEX_WHITE_OBJECT];
 TR::TextureInfo &whiteSprite = CommonTex[CTEX_WHITE_SPRITE];
@@ -1337,9 +1342,27 @@ struct MeshBuilder {
             Vertex &v = vertices[vCount + i];
             v.normal  = short4( 0, 0, 0, 0 );
             if (color2 != 0 && (i == 0 || i == 3))
-                v.light.value = color2;
+                setPacked(v.light, color2);
             else
-                v.light.value = color;
+                setPacked(v.light, color);
+        #ifdef _GAPI_MAGGIE
+            // the bar textures are not in the split tiles: their top and bottom colours go into the vertices
+            {
+                static const uint8 barColor[CTEX_MAX][2][3] = {
+                    { { 255, 255, 255 }, { 0x58, 0x00, 0xA2 } },    // flash
+                    { { 0xAE, 0x81, 0x5E }, { 0x4F, 0x30, 0x16 } }, // health
+                    { { 0x48, 0x78, 0xA4 }, { 0x30, 0x30, 0x30 } }, // oxygen
+                    { { 0x80, 0x80, 0x80 }, { 0x30, 0x30, 0x30 } }, // option
+                    { { 255, 255, 255 }, { 255, 255, 255 } }, { { 255, 255, 255 }, { 255, 255, 255 } }, { { 255, 255, 255 }, { 255, 255, 255 } } };
+                int id = int(&tile - CommonTex);
+                if (id >= 0 && id < CTEX_MAX) {
+                    const uint8 *c = barColor[id][i < 2 ? 0 : 1];
+                    v.light.x = uint8(v.light.x * c[0] / 255);
+                    v.light.y = uint8(v.light.y * c[1] / 255);
+                    v.light.z = uint8(v.light.z * c[2] / 255);
+                }
+            }
+        #endif
 
             short2 uv = tile.texCoordAtlas[i];
 
@@ -1378,7 +1401,7 @@ struct MeshBuilder {
         for (int i = 0; i < 8; i++) {
             Vertex &v = vertices[vCount + i];
             v.normal      = short4( 0, 0, 0, 0 );
-            v.light.value = color1;
+            setPacked(v.light, color1);
             v.texCoord    = uv;
         }
 
@@ -1398,7 +1421,7 @@ struct MeshBuilder {
         for (int i = 0; i < 8; i++) {
             Vertex &v = vertices[vCount + i];
             v.normal      = short4( 0, 0, 0, 0 );
-            v.light.value = color2;
+            setPacked(v.light, color2);
             v.texCoord    = uv;
         }
 

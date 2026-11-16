@@ -173,6 +173,7 @@ namespace Mag {
     bool     zSpan;                      // current spans test/write depth
     bool     alphaTest;                  // GAPI::setAlphaTest: transparent texels (alpha page)
     bool     bilinear = true;            // F8 toggles: filtered textures on 3D faces
+    bool     mipmaps = true;             // F9 toggles (hardware back end): Maggie's automatic mip level
     bool     curFlat;                    // the bound texture is the white one (flat colour)
 
     // Maggie mode: bit2 16-bit output, bit1 z test/write, bit0 bilinear (3D textured faces only:
@@ -189,8 +190,11 @@ namespace Mag {
 
     // The hardware back end (gapi/maggie.h) composes the mode itself:
     // bit 0 bilinear, 1 z test, 2 16-bit output, 3 no z write, 6 add, 7 multiply
+    bool zClean = false;                 // nothing drawn into the depth buffer since its last clear
+
     inline void setMode(uint16 mode) {
         zSpan = (mode & 2) != 0;
+        if (zSpan) zClean = false;
         if (mode != curMode) {
             curMode = mode;
             MAG_REGS->mode = mode;
@@ -334,6 +338,7 @@ namespace Mag {
         if (!zbuf) return;
         uint32 *p = (uint32*)zbuf, *e = p + zWidth * zHeight / 2;
         while (p < e) { p[0] = p[1] = p[2] = p[3] = p[4] = p[5] = p[6] = p[7] = 0xFFFFFFFF; p += 8; }
+        zClean = true;
     }
 
     void setup() {                       // start of a frame: registers to a known state
