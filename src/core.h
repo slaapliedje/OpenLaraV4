@@ -1031,6 +1031,16 @@ namespace Core {
             ctrl.keys[ cStart     ] = KeySet( ikNone,   jkStart  );
         }
 
+    #ifdef _OS_AMIGA
+    // Vampire V4 USB pad: Select is the core's hotkey button (Select + trigger = HRTmon), so it is
+    // not passed to the game; Start opens the inventory. Layout of the V4 fixed-engine port:
+    // A jump, X action, Y weapon, B roll, LB look, RB walk (menus: A select, B back).
+        settings.controls[0].keys[ cJump      ].joy = jkA;
+        settings.controls[0].keys[ cAction    ].joy = jkX;
+        settings.controls[0].keys[ cInventory ].joy = jkStart;
+        settings.controls[0].keys[ cStart     ].joy = jkNone;
+    #endif
+
     // use S key for action on Mac because Ctrl + Left/Right used by system (default)
     #ifdef _OS_MAC
         settings.controls[0].keys[ cAction    ].key = ikS;

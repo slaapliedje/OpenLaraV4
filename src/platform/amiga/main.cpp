@@ -95,8 +95,12 @@ struct OLAHIRequest {
 #define OL_AHIST_S16S       3
 
 #define SND_FRAMES 1024                  // 23 ms at 44.1 kHz per buffer
+#define SND_DUMP_FRAMES 1024             // headless dump: same size (the mixer keeps its first size)
 static volatile bool sndQuit = false;
 static volatile bool sndRunning = false;
+static volatile int  sndOpenError = 1;   // set by the sound task: 0 = AHI open, else OpenDevice's error
+static int sndUnit = OL_AHI_DEFAULT_UNIT; // ENV:OLAHIUNIT
+static void sndStop();
 static struct Task *sndMainTask = NULL;
 static BYTE sndDoneSig = -1;
 
@@ -113,9 +117,11 @@ static void sndTask()
         buf[1] = (Sound::Frame*)AllocVec(SND_FRAMES * sizeof(Sound::Frame), MEMF_PUBLIC | MEMF_CLEAR);
         if (req[0] && req[1] && buf[0] && buf[1]) {
             req[0]->ahir_Version = 4;
-            open = OpenDevice((STRPTR)"ahi.device", OL_AHI_DEFAULT_UNIT, (struct IORequest*)req[0], 0) == 0;
+            sndOpenError = OpenDevice((STRPTR)"ahi.device", sndUnit, (struct IORequest*)req[0], 0);
+            open = sndOpenError == 0;
         }
     }
+    if (!open && !sndOpenError) sndOpenError = -99;   // no memory / port
     if (open) {
         CopyMem(req[0], req[1], sizeof(OLAHIRequest));
         sndRunning = true;
@@ -161,6 +167,17 @@ static bool sndStart()
     struct Process *p = CreateNewProcTags(NP_Entry, (ULONG)sndTask, NP_Name, (ULONG)"OpenLara sound",
                                           NP_Priority, 5, NP_StackSize, 128 * 1024, TAG_DONE);
     if (!p) { FreeSignal(sndDoneSig); sndDoneSig = -1; return false; }
+    // wait until the task has opened AHI (or failed) so the result can be reported
+    for (int i = 0; i < 100 && !sndRunning; i++) {
+        if (SetSignal(0, 0) & (1UL << sndDoneSig)) break;   // the task ended: OpenDevice failed
+        Delay(1);
+    }
+    if (!sndRunning) {
+        printf("sound: AHI unit %d did not open (error %d)\n", sndUnit, sndOpenError);
+        sndStop();
+        return false;
+    }
+    printf("sound: AHI unit %d\n", sndUnit);
     return true;
 }
 
@@ -450,6 +467,7 @@ __attribute__((noinline)) static int olMain()
     APTR oldWin = me->pr_WindowPtr;
     me->pr_WindowPtr = (APTR)-1;         // no "insert volume ENV:" requester where ENV: is missing
     bool noSound = GetVar((STRPTR)"OLNOSOUND", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0;
+    if (GetVar((STRPTR)"OLAHIUNIT", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) sndUnit = atoi(envTmp);
     bool sound = !headlessFrames && !noSound && sndStart();
 #ifdef OL_MAGGIE
     if (GetVar((STRPTR)"OLNOZ", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::zEnabled = false;   // ENV:OLNOZ: no depth buffer
@@ -460,11 +478,16 @@ __attribute__((noinline)) static int olMain()
     if (GetVar((STRPTR)"OLNOCLIP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) GAPI::swNearClip = false;  // ENV:OLNOCLIP
 #endif
     me->pr_WindowPtr = oldWin;
-    printf("sound: %s\n", sound ? "AHI" : "off");
+    if (!sound) printf("sound: off\n");
 
     int loopFrame = 0;
-    if (headlessFrames && __argc > 4 && loadScript(__argv[4]))
+    FILE *sndDump = NULL;                // OUTPREFIX.pcm: 44.1 kHz 16-bit stereo big-endian
+    if (headlessFrames && __argc > 4 && loadScript(__argv[4])) {
         fakeTimeMS = 0;
+        char name[256];
+        sprintf(name, "%s.pcm", outPrefix);
+        sndDump = fopen(name, "wb");
+    }
     int frames = 0, tUpd = 0, tRen = 0, tStart = osGetTimeMS();
     int levelFrames = -1;
     FILE *out = NULL;
@@ -517,6 +540,11 @@ __attribute__((noinline)) static int olMain()
             break;
         }
         if (shotNow && outPrefix) saveFrame(outPrefix, loopFrame, fb);
+        if (sndDump) {                   // scripted runs: the mixer's output, 1/30 s per loop
+            static Sound::Frame frames[SND_DUMP_FRAMES];
+            Sound::fill(frames, SND_DUMP_FRAMES);
+            fwrite(frames, sizeof(frames), 1, sndDump);
+        }
         if (out && fakeTimeMS >= 0 && (loopFrame % 30) == 0) {
             fprintf(out, "loop %d level %d\n", loopFrame, Game::level ? (int)Game::level->level.id : -1);
             fflush(out);
@@ -551,6 +579,7 @@ __attribute__((noinline)) static int olMain()
     }
 
     if (sound) sndStop();
+    if (sndDump) fclose(sndDump);
     if (out) fclose(out);
     Game::deinit();
     videoFree();
