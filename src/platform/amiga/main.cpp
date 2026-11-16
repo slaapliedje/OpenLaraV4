@@ -32,8 +32,13 @@ static struct Screen* screen = NULL;
 static struct Window* window = NULL;
 static UBYTE* fbMem = NULL;
 static uint16* fb = NULL;               // the buffer being drawn
-static uint16* fbBuf[2];                // double buffering: SAGA shows one while we draw the other
+// Triple buffering: SAGA takes a new display address at the next vertical blank, so the buffer we
+// just replaced may still be on screen for up to a frame; clearing it right away showed as a black
+// line running through the picture. With three, the buffer we draw into left the screen two flips ago.
+#define FB_COUNT 3
+static uint16* fbBuf[FB_COUNT];
 static int fbBack = 0;
+static int fbHidden[FB_COUNT];           // osGetTimeMS() when each buffer was replaced on screen
 static ULONG sagaOld = 0;
 #define SAGA_GFXADDR   ((volatile ULONG*)0xDFF1EC)
 #define SAGA_GFXADDR_R ((volatile ULONG*)0xDFE1EC)
@@ -289,12 +294,14 @@ static bool videoInit()
 
     // two frame buffers of our own, shown by pointing SAGA at them (P96 screen buffers flicker on vampiregfx)
     ULONG size = (SCREEN_WIDTH * 2 * screen->Height + 63) & ~63UL;
-    fbMem = (UBYTE*)AllocVec(size * 2 + 64, MEMF_ANY | MEMF_CLEAR);
+    fbMem = (UBYTE*)AllocVec(size * FB_COUNT + 64, MEMF_ANY | MEMF_CLEAR);
     if (!fbMem) return false;
-    fbBuf[0] = (uint16*)(((ULONG)fbMem + 63) & ~63UL);
-    fbBuf[1] = (uint16*)((UBYTE*)fbBuf[0] + size);
+    for (int i = 0; i < FB_COUNT; i++) {
+        fbBuf[i] = (uint16*)((((ULONG)fbMem + 63) & ~63UL) + i * size);
+        fbHidden[i] = 0;
+    }
     sagaOld = base;
-    *SAGA_GFXADDR = (ULONG)fbBuf[1];
+    *SAGA_GFXADDR = (ULONG)fbBuf[FB_COUNT - 1];
     fbBack = 0;
     fb = fbBuf[0];
     return true;
@@ -491,9 +498,12 @@ __attribute__((noinline)) static int olMain()
         int b = osGetTimeMS();
         if (draw) {
             Game::render();              // ends with GAPI::endFrame: Maggie has finished the frame
-            if (!headlessFrames) {       // show it, draw the next one into the other buffer
+            if (!headlessFrames) {       // show it, draw the next one into the oldest buffer
+                int shown = (fbBack + FB_COUNT - 1) % FB_COUNT;   // on screen until the next vblank
                 *SAGA_GFXADDR = (ULONG)fb;
-                fbBack ^= 1;
+                fbHidden[shown] = osGetTimeMS();
+                fbBack = (fbBack + 1) % FB_COUNT;
+                if (osGetTimeMS() - fbHidden[fbBack] < 20) WaitTOF();   // very fast frames only
                 fb = fbBuf[fbBack];
                 GAPI::swColor = fb;
             }
