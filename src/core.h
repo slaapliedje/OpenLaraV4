@@ -104,7 +104,11 @@
 #elif defined(__AMIGA__)
     // Apollo Vampire V4 (68080 + SAGA), AmigaOS 3.x: software renderer into a 16-bit SAGA screen
     #define _OS_AMIGA   1
-    #define _GAPI_SW    1
+    #ifdef OL_MAGGIE_HW
+        #define _GAPI_MAGGIE 1  // gapi/maggie.h: the fixed-function path on the Maggie texture unit
+    #else
+        #define _GAPI_SW    1
+    #endif
 
     #undef OS_PTHREAD_MT
     #undef USE_CUBEMAP_MIPS
@@ -243,7 +247,7 @@
     #include "libs/tinf/tinf.h"
 #endif
 
-#if defined(_GAPI_SW) || defined(_GAPI_GU)
+#if defined(_GAPI_SW) || defined(_GAPI_GU) || defined(_GAPI_MAGGIE)
     #define FFP
 #endif
 
@@ -408,7 +412,7 @@ namespace Core {
             }
 
             void setLighting(Quality value) {
-            #if defined(_GAPI_SW) || defined(_GAPI_GU)
+            #if defined(_GAPI_SW) || defined(_GAPI_GU) || defined(_GAPI_MAGGIE)
                 lighting = LOW;
             #else
                 lighting = value;
@@ -416,7 +420,7 @@ namespace Core {
             }
 
             void setShadows(Quality value) {
-            #if defined(_GAPI_SW) || defined(_GAPI_GU)
+            #if defined(_GAPI_SW) || defined(_GAPI_GU) || defined(_GAPI_MAGGIE)
                 shadows = LOW;
             #else
                 shadows = value;
@@ -424,7 +428,7 @@ namespace Core {
             }
 
             void setWater(Quality value) {
-            #if defined(_GAPI_SW) || defined(_GAPI_GU)
+            #if defined(_GAPI_SW) || defined(_GAPI_GU) || defined(_GAPI_MAGGIE)
                 water = LOW;
             #else
                 if (value > LOW && !(support.texFloat || support.texHalf))
@@ -808,6 +812,8 @@ namespace Core {
 
 #ifdef _GAPI_SW
     #include "gapi/sw.h"
+#elif _GAPI_MAGGIE
+    #include "gapi/maggie.h"
 #elif _GAPI_GL
     #include "gapi/gl.h"
 #elif _GAPI_D3D8

@@ -33,6 +33,7 @@
         MagVtx *v[4];                    // clockwise on screen
         int32   n;                       // 3, or 4 for a flat quad
         float   area;                    // cross product of v0 v1 v2 in pixels, > 0
+        uint32  tint;                    // hardware back end: colour multiply 0x00RRGGBB
     };
 
     MagVtx  *magVtxBuf  = NULL;
@@ -46,6 +47,11 @@
 
     #define MAG_MIN_AREA  0.002f         // pixels^2 (cross product): smaller polygons cover no pixel centre worth drawing
     #define MAG_XY_MAX    (8192 << 4)    // vertex clamp: an edge's 16.16 step per line then fits 32 bits
+
+#ifdef _GAPI_SW
+    // per polygon: flat colours pick their palette colour; the mode follows the depth test
+    #define MAG_PRIM_BEGIN(pr, a) { if (magColored) Mag::bindFlat((a)->u >> 16); Mag::depthMode(); }
+#endif
 
 // --- rasteriser ---------------------------------------------------------------------------------
     struct MagEdge {
@@ -97,8 +103,7 @@
         MAG_COUNT(2, 1);
 
         const MagVtx *a = p[0], *b = p[1], *c = p[2];
-        if (magColored) Mag::bindFlat(a->u >> 16);
-        Mag::depthMode();
+        MAG_PRIM_BEGIN(pr, a);
 
         // gradients per pixel of a value known at a, b, c:  d/dx = (B - A) * kbx + (C - A) * kcx
         float inv = 0.0625f / pr.area;
@@ -244,6 +249,7 @@
         }
     }
 
+#ifdef _GAPI_SW
 // --- transform ----------------------------------------------------------------------------------
     mat4  magViewProj;                   // mViewProj the cached product belongs to
     mat4  magScreenProj;                 // viewport * mViewProj
@@ -464,5 +470,7 @@
         if (MAG_STAGE(1)) return;
         for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDraw(*pr);
     }
+
+#endif // _GAPI_SW
 
 #endif

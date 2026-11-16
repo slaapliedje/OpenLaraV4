@@ -1,7 +1,8 @@
 #!/bin/bash
 # OpenLara main engine for the Apollo Vampire V4
 #   ./build.sh           -> OpenLara          software renderer
-#   ./build.sh mag       -> OpenLaraMag       spans drawn by Maggie (SAGA texture unit)
+#   ./build.sh mag       -> OpenLaraMag       software renderer's palette/lightmap look, spans drawn by Maggie
+#   ./build.sh hw        -> OpenLaraHW        Maggie back end (gapi/maggie.h): true-colour textures, blending
 #   ./build.sh mag emu   -> OpenLaraMagEmu    Maggie build with a software Maggie, for emu.sh (Amiberry)
 #   ./build.sh mag prof  -> OpenLaraMagProf   stage profiling (ENV:OLDBG, see maggie_sw.h)
 # Needs bebbo m68k-amigaos gcc 6.5. C code as 68060 (-m68080 traps on core 12846).
@@ -15,6 +16,7 @@ OUT=OpenLara; B=build
 for a in "$@"; do
   case $a in
     mag) FLAGS="$FLAGS -DOL_MAGGIE"; OUT=${OUT}Mag; B=${B}-mag ;;
+    hw) FLAGS="$FLAGS -DOL_MAGGIE -DOL_MAGGIE_HW"; OUT=${OUT}HW; B=${B}-hw ;;
     emu) FLAGS="$FLAGS -DOL_EMU"; OUT=${OUT}Emu; B=${B}-emu ;;
     prof) FLAGS="$FLAGS -DOL_PROFILE"; OUT=${OUT}Prof; B=${B}-prof ;;
     *) echo "unknown option $a"; exit 1 ;;

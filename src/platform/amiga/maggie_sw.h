@@ -187,6 +187,69 @@ namespace Mag {
         }
     }
 
+    // The hardware back end (gapi/maggie.h) composes the mode itself:
+    // bit 0 bilinear, 1 z test, 2 16-bit output, 3 no z write, 6 add, 7 multiply
+    inline void setMode(uint16 mode) {
+        zSpan = (mode & 2) != 0;
+        if (mode != curMode) {
+            curMode = mode;
+            MAG_REGS->mode = mode;
+        }
+    }
+
+    // RGBA8888 (alpha < 128 = transparent when alpha is set) size x size -> DXT1. Endpoints are the
+    // darkest and brightest opaque texel of each block: quick, and fine for game textures.
+    void encodeRGBA(const uint8 *src, int stride, int size, uint8 *dst, bool alpha) {
+        for (int by = 0; by < size; by += 4)
+            for (int bx = 0; bx < size; bx += 4, dst += 8) {
+                int r[16], g[16], b[16], lum[16], lo = -1, hi = -1, trans = 0;
+                uint32 opaque = 0;
+                for (int i = 0; i < 16; i++) {
+                    const uint8 *p = src + ((by + (i >> 2)) * stride + bx + (i & 3)) * 4;
+                    r[i] = p[0]; g[i] = p[1]; b[i] = p[2];
+                    if (alpha && p[3] < 128) { trans = 1; continue; }
+                    opaque |= 1u << i;
+                    lum[i] = r[i] * 2 + g[i] * 5 + b[i];
+                    if (lo < 0 || lum[i] < lum[lo]) lo = i;
+                    if (hi < 0 || lum[i] > lum[hi]) hi = i;
+                }
+                if (!opaque) { dst[0] = dst[1] = dst[2] = dst[3] = 0; dst[4] = dst[5] = dst[6] = dst[7] = 0xFF; continue; }
+                uint16 c0 = rgb565(r[hi], g[hi], b[hi]), c1 = rgb565(r[lo], g[lo], b[lo]);
+                int pr[4], pg[4], pb[4], n;
+                if (trans || c0 == c1) {             // 3 colours + transparent: col0 <= col1
+                    if (c0 > c1) { uint16 t = c0; c0 = c1; c1 = t; int k = lo; lo = hi; hi = k; }
+                    n = 3;
+                } else {                             // 4 colours: col0 > col1
+                    if (c0 < c1) { uint16 t = c0; c0 = c1; c1 = t; int k = lo; lo = hi; hi = k; }
+                    n = 4;
+                }
+                pr[0] = r[hi]; pg[0] = g[hi]; pb[0] = b[hi];
+                pr[1] = r[lo]; pg[1] = g[lo]; pb[1] = b[lo];
+                if (n == 4) {
+                    pr[2] = (2 * pr[0] + pr[1]) / 3; pg[2] = (2 * pg[0] + pg[1]) / 3; pb[2] = (2 * pb[0] + pb[1]) / 3;
+                    pr[3] = (pr[0] + 2 * pr[1]) / 3; pg[3] = (pg[0] + 2 * pg[1]) / 3; pb[3] = (pb[0] + 2 * pb[1]) / 3;
+                } else {
+                    pr[2] = (pr[0] + pr[1]) / 2; pg[2] = (pg[0] + pg[1]) / 2; pb[2] = (pb[0] + pb[1]) / 2;
+                }
+                uint32 pix = 0;
+                for (int i = 0; i < 16; i++) {
+                    int idx = 3;
+                    if (opaque & (1u << i)) {
+                        int bd = 1 << 30;
+                        for (int k = 0; k < n; k++) {
+                            int dr = r[i] - pr[k], dg = g[i] - pg[k], db = b[i] - pb[k];
+                            int d = dr * dr * 2 + dg * dg * 4 + db * db;
+                            if (d < bd) { bd = d; idx = k; }
+                        }
+                    }
+                    pix |= uint32(idx) << (i * 2);
+                }
+                dst[0] = c0 & 0xFF; dst[1] = c0 >> 8;
+                dst[2] = c1 & 0xFF; dst[3] = c1 >> 8;
+                dst[4] = pix & 0xFF; dst[5] = (pix >> 8) & 0xFF; dst[6] = (pix >> 16) & 0xFF; dst[7] = pix >> 24;
+            }
+    }
+
     uint8* allocTex(int bytes, uint8 **mem) {
         *mem = (uint8*)osMagAlloc(bytes + 32);
         return *mem ? (uint8*)((uint32(*mem) + 31) & ~31U) : NULL;
@@ -374,7 +437,7 @@ namespace Mag {
     }
 
 #ifdef OL_EMU
-    // --- software Maggie for the emulator build (point sampling, no z) -----------------------
+    // --- software Maggie for the emulator build (point sampling) -------------------------------
     void EmuStart::operator = (uint16 len) volatile {
         Regs *m = &emuRegs;
         uint16 *dst = (uint16*)m->pixDest;
@@ -418,8 +481,13 @@ namespace Mag {
             r  = int32((r  * f) >> 16) * mr / 255;
             g  = int32((g  * f) >> 16) * mg / 255;
             bb = int32((bb * f) >> 16) * mb / 255;
+            if (m->mode & 0x00C0) {          // blending: add (bit 6), multiply (bit 7)
+                int32 dr = (*dst >> 11) & 31, dg = (*dst >> 5) & 63, db = *dst & 31;
+                if (m->mode & 0x0040) { r = min(31, r + dr); g = min(63, g + dg); bb = min(31, bb + db); }
+                else                  { r = r * dr / 31; g = g * dg / 63; bb = bb * db / 31; }
+            }
             *dst = uint16((r << 11) | (g << 5) | bb);
-            if (zt) *zb = zz;
+            if (zt && !(m->mode & 0x0008)) *zb = zz;
         }
     }
 #endif

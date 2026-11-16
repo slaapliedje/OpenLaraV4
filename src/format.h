@@ -6561,6 +6561,8 @@ namespace TR {
                 case VER_TR1_PC  : 
                     #ifdef _GAPI_SW
                         return Color32(texture & 0xFF, 0, 0, 142);
+                    #elif defined(_GAPI_MAGGIE)   // alpha 142 marks a face without texture (gapi/maggie.h)
+                        return Color32(palette[texture & 0xFF].r, palette[texture & 0xFF].g, palette[texture & 0xFF].b, 142);
                     #else
                         return palette[texture & 0xFF];
                     #endif
