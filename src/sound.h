@@ -1021,7 +1021,13 @@ namespace Sound {
             }
 
         // apply volume
+        #ifdef _OS_AMIGA
+            // The curve below leaves a 0.3 volume sound (Lara's footsteps) at 5% amplitude: inaudible on
+            // the V4's speakers next to the music and effects. A square law keeps it quiet but present.
+            #define VOL_CONV(x) ((x) * (x));
+        #else
             #define VOL_CONV(x) (1.0f - sqrtf(1.0f - x * x));
+        #endif
 
             float m = ((flags & MUSIC) ? Core::settings.audio.music : Core::settings.audio.sound) / float(SND_MAX_VOLUME);
             float v = volume * m;

@@ -529,7 +529,9 @@ __attribute__((noinline)) static int olMain()
     me->pr_WindowPtr = (APTR)-1;         // no "insert volume ENV:" requester where ENV: is missing
     bool noSound = GetVar((STRPTR)"OLNOSOUND", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0;
     if (GetVar((STRPTR)"OLAHIUNIT", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) sndUnit = atoi(envTmp);
-    if (GetVar((STRPTR)"OLNOREVERB", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Core::settings.audio.reverb = false;
+    // Reverb costs 15.6 ms of every 23.2 ms of sound on the 68080 (the mix alone 2.0 ms) - three
+    // quarters of the machine: off unless ENV:OLREVERB is set, whatever the saved settings say.
+    Core::settings.audio.reverb = GetVar((STRPTR)"OLREVERB", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0;
     bool sound = !headlessFrames && !noSound && sndStart();
 #ifdef OL_MAGGIE
 #ifdef OL_PROFILE
@@ -546,6 +548,7 @@ __attribute__((noinline)) static int olMain()
 #endif
     me->pr_WindowPtr = oldWin;
     if (!sound) printf("sound: off\n");
+    printf("volume: music %d sound %d of %d, reverb %d\n", Core::settings.audio.music, Core::settings.audio.sound, SND_MAX_VOLUME, Core::settings.audio.reverb ? 1 : 0);
 
     int loopFrame = 0;
     FILE *sndDump = NULL;                // OUTPREFIX.pcm: 44.1 kHz 16-bit stereo big-endian
@@ -609,7 +612,11 @@ __attribute__((noinline)) static int olMain()
         if (shotNow && outPrefix) saveFrame(outPrefix, loopFrame, fb);
         if (sndDump) {                   // scripted runs: the mixer's output, 1/30 s per loop
             static Sound::Frame frames[SND_DUMP_FRAMES];
+            struct EClockVal ev;         // real time of the mix, for the report at the end
+            ElapsedTime(&ev);
             Sound::fill(frames, SND_DUMP_FRAMES);
+            sndMixTime += ElapsedTime(&ev);
+            sndMixCount++;
             fwrite(frames, sizeof(frames), 1, sndDump);
         }
         if (out && fakeTimeMS >= 0 && (loopFrame % 30) == 0) {
@@ -664,6 +671,10 @@ __attribute__((noinline)) static int olMain()
     printf("CNT polys %u corners %u drawn %u spans %u pixels %u c5 %u c6 %u dips %u loops %d\n", Mag::cnt[0], Mag::cnt[1], Mag::cnt[2], Mag::cnt[3], Mag::cnt[4], Mag::cnt[5], Mag::cnt[6], Mag::cnt[7], loopFrame);
 #endif
     if (sound) sndStop();
+    if (sndDump && sndMixCount) {
+        ULONG us = (ULONG)(((uint64)sndMixTime * 1000000) >> 16) / sndMixCount;
+        printf("mixer: %lu.%lu ms per %d frames (23.2 ms of sound)\n", us / 1000, (us / 100) % 10, SND_DUMP_FRAMES);
+    }
     if (sndDump) fclose(sndDump);
     if (out) fclose(out);
     Game::deinit();
