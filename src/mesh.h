@@ -225,7 +225,7 @@ struct MeshBuilder {
     // face has its own vertices, so moving whole faces keeps every face intact; the two sides of a
     // double-sided face stay together and in order (same cell, the tie-break keeps their order).
     // Order inside the opaque pass does not matter with the z-buffer.
-    void cellSort(Geometry &geom, Index *indices, const Vertex *vertices) {
+    void cellSort(Geometry &geom, Index *indices, Vertex *vertices) {
         if (!geom.count) return;
         const int vStart = geom.ranges[0].vStart;
         const int iBegin = geom.ranges[0].iStart;
@@ -323,12 +323,56 @@ struct MeshBuilder {
 
         free(faces);
         free(sorted);
+        numberPositions(geom, indices + iBegin, total, vertices + vStart);
+    }
+
+    // Numbers the distinct positions of a geometry's vertices 0..n-1 in coord.w (unused by rooms and
+    // static meshes, which are built with w = 0), in the order the sorted faces first use them, so a
+    // cell's positions sit close together. The geometry's ranges get posBase, its first entry in the
+    // level's table. Leaves posBase at -1 (no numbers) if anything does not fit.
+    void numberPositions(Geometry &geom, const Index *idx, int count, Vertex *vtx) {
+        int size = 1024;
+        while (size < count * 2) size <<= 1;
+        int32 *table = (int32*)malloc(sizeof(int32) * size);          // vertex index of each number's first vertex, or -1
+        if (!table) return;
+        memset(table, 0xFF, sizeof(int32) * size);
+        int n = 0;
+        bool ok = true;
+        for (int i = 0; i < count && ok; i++) {
+            Vertex &v = vtx[idx[i]];
+            if (v.coord.w < 0) continue;                                // numbered already: marked below
+            const short4 &c = v.coord;
+            uint32 h = uint32(c.x * 73 + c.y * 151 + c.z * 283);
+            int s = int((h ^ (h >> 9)) & uint32(size - 1));
+            for (;;) {
+                if (table[s] < 0) {                                     // a new position
+                    if (n >= 32767) { ok = false; break; }
+                    table[s] = idx[i];
+                    v.coord.w = int16(-1 - n);                          // negative while numbering: seen
+                    n++;
+                    break;
+                }
+                const short4 &o = vtx[table[s]].coord;
+                if (o.x == c.x && o.y == c.y && o.z == c.z) { v.coord.w = o.w; break; }
+                s = (s + 1) & (size - 1);
+            }
+        }
+        // -1 - number back to number; on failure, every vertex back to w = 0
+        for (int i = 0; i < count; i++) {
+            Vertex &v = vtx[idx[i]];
+            if (v.coord.w < 0) v.coord.w = ok ? int16(-1 - v.coord.w) : 0;
+        }
+        free(table);
+        if (!ok) return;
+        for (int k = 0; k < geom.count; k++) geom.ranges[k].posBase = gMeshPosCount;
+        gMeshPosCount += n;
     }
 #endif
 
     MeshBuilder(TR::Level *level, Texture *atlas) : atlas(atlas), level(level) {
     #ifdef OL_ROOM_CELLS
         cells = NULL; cellsCount = cellsCap = 0;
+        gMeshPosCount = 0;
     #endif
         dynMesh = new Mesh(NULL, COUNT(dynIndices), NULL, COUNT(dynVertices), 1, true);
         dynRange.vStart = 0;

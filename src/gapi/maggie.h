@@ -487,17 +487,20 @@ namespace GAPI {
 
     bool magDbgCulled = false;
 
-    // transformed positions under the current matrix, by object-space position
-    #define MAG_XFORM_SIZE 2048
+    // work done once per numbered position under the current matrix (see DIP)
     struct MagXform {
-        uint32 key1, key2;               // x, y / z, stamp
+        uint32 stamp;                    // valid for this matrix and scissor (hash entries: z << 16 | stamp)
+        uint32 key1;                     // hash entries: x << 16 | y
         float  x, y, w;                  // screen space times w
         int32  code;                     // clip bits; bit 6: the projected values below are filled in
         float  px, py;                   // pixels
         int32  ix, iy, iz;               // as MagVtx
         float  q;
         int32  fog;                      // distance fade, 0..256
-    } magXform[MAG_XFORM_SIZE];
+    } *magPos = NULL;
+    int    magPosCap = 0;
+    #define MAG_HASH_SIZE 1024
+    MagXform magHash[MAG_HASH_SIZE];
     uint16 magXformStamp = 0;
     short4 magXformClip;
     mat4   magModel, magM;               // mModel the cache belongs to, and screenProj * mModel
@@ -591,10 +594,25 @@ namespace GAPI {
                     for (int k = 0; k < 3; k++) magPlane[j][4 + k] = fabsf(magPlane[j][k]);
             }
             // a new stamp empties the position cache
-            if (++magXformStamp == 0) { memset(magXform, 0, sizeof(magXform)); magXformStamp = 1; }
+            if (++magXformStamp == 0) {
+                if (magPos) memset(magPos, 0, magPosCap * sizeof(MagXform));
+                memset(magHash, 0, sizeof(magHash));
+                magXformStamp = 1;
+            }
         }
         const mat4 &m = magM;
         const uint32 stamp = magXformStamp;
+        MagXform *posTable = NULL;
+    #ifdef OL_ROOM_CELLS
+        if (range.posBase >= 0 && gMeshPosCount > 0) {
+            if (magPosCap < gMeshPosCount) {         // a new level: the table grows, emptied
+                magPosCap = gMeshPosCount + 1024;
+                magPos = (MagXform*)realloc(magPos, magPosCap * sizeof(MagXform));
+                if (magPos) memset(magPos, 0, magPosCap * sizeof(MagXform)); else magPosCap = 0;
+            }
+            if (magPos) posTable = magPos + range.posBase;
+        }
+    #endif
         const bool lit = lightsCount > 0 && !MAG_STAGE(3);
         if (lit && magLightsFor != magLightsVersion) { transformLights(); magLightsFor = magLightsVersion; }
 
@@ -669,36 +687,47 @@ namespace GAPI {
             }
             MAG_COUNT(1, count);
 
-            float cx[4], cy[4], cw[4];
-            MagXform *slot[4];
-            uint32 keyA[4], keyB[4];
+            // Each corner's position: transformed, clip-coded and (below) projected once. Room geometry
+            // has its positions numbered at load (MeshRange::posBase + coord.w), so neighbouring faces
+            // and the room's other draw calls find the work done in a table; anything else is done here.
+            MagXform *e[4];
+            MagXform own[4];
             int32 behind = 0, outside = 15, tooFar = 0;
             for (int k = 0; k < count; k++) {
-                // neighbouring faces repeat the same positions: look the corner up before transforming it
                 const short4 &c = vx[k]->coord;
-                const uint32 key1 = (uint32(uint16(c.x)) << 16) | uint16(c.y), key2 = (uint32(uint16(c.z)) << 16) | stamp;
-                uint32 h = uint32(c.x * 73 + c.y * 151 + c.z * 283);
-                MagXform &e = magXform[(h ^ (h >> 9)) & (MAG_XFORM_SIZE - 1)];
-                if (e.key1 != key1 || e.key2 != key2) {
-                    e.key1 = key1; e.key2 = key2;
-                    float x = float(c.x), y = float(c.y), z = float(c.z);
-                    float w = m.e30 * x + m.e31 * y + m.e32 * z + m.e33;
-                    float sx = m.e00 * x + m.e01 * y + m.e02 * z + m.e03;
-                    float sy = m.e10 * x + m.e11 * y + m.e12 * z + m.e13;
-                    e.x = sx; e.y = sy; e.w = w;
+                MagXform *x;
+                if (posTable) {
+                    x = posTable + uint16(c.w);
+                    if (x->stamp == stamp) goto known;
+                    x->stamp = stamp;
+                } else {
+                    // models and dynamic geometry: a small hash of positions under this matrix
+                    const uint32 key1 = (uint32(uint16(c.x)) << 16) | uint16(c.y), key2 = (uint32(uint16(c.z)) << 16) | stamp;
+                    uint32 h = uint32(c.x * 73 + c.y * 151 + c.z * 283);
+                    x = magHash + ((h ^ (h >> 9)) & (MAG_HASH_SIZE - 1));
+                    if (x->key1 == key1 && x->stamp == key2) goto known;
+                    // taken by another position: not if an earlier corner of this polygon is using it
+                    if ((k > 0 && x == e[0]) || (k > 1 && x == e[1]) || (k > 2 && x == e[2])) x = own + k;
+                    else { x->key1 = key1; x->stamp = key2; }
+                }
+                {
+                    float fx = float(c.x), fy = float(c.y), fz = float(c.z);
+                    float w = m.e30 * fx + m.e31 * fy + m.e32 * fz + m.e33;
+                    float sx = m.e00 * fx + m.e01 * fy + m.e02 * fz + m.e03;
+                    float sy = m.e10 * fx + m.e11 * fy + m.e12 * fz + m.e13;
+                    x->x = sx; x->y = sy; x->w = w;
                     int32 wb = magBits(w);
                     // bits 0..3: left of, right of, above, below the scissor rectangle - the portal a room is
-                    // seen through (sign bits; valid for w > 0),
-                    // bit 4 too far, bit 5 behind the near plane
-                    e.code = (uint32(magBits(sx - clipL * w)) >> 31) | ((uint32(magBits(clipR * w - sx)) >> 31) << 1) |
-                             ((uint32(magBits(sy - clipT * w)) >> 31) << 2) | ((uint32(magBits(clipB * w - sy)) >> 31) << 3) |
-                             (wb > farBits ? 16 : 0) | (wb < nearBits ? 32 : 0);
+                    // seen through (sign bits; valid for w > 0), bit 4 too far, bit 5 behind the near plane
+                    x->code = (uint32(magBits(sx - clipL * w)) >> 31) | ((uint32(magBits(clipR * w - sx)) >> 31) << 1) |
+                              ((uint32(magBits(sy - clipT * w)) >> 31) << 2) | ((uint32(magBits(clipB * w - sy)) >> 31) << 3) |
+                              (wb > farBits ? 16 : 0) | (wb < nearBits ? 32 : 0);
                 }
-                cx[k] = e.x; cy[k] = e.y; cw[k] = e.w;
-                slot[k] = &e; keyA[k] = key1; keyB[k] = key2;
-                outside &= e.code;
-                tooFar |= e.code & 16;
-                behind += (e.code >> 5) & 1;
+            known:
+                e[k] = x;
+                outside &= x->code;
+                tooFar |= x->code & 16;
+                behind += (x->code >> 5) & 1;
             }
             if ((tooFar && !ortho) || behind == count) continue;
             if (MAG_STAGE(5)) continue;
@@ -706,37 +735,28 @@ namespace GAPI {
             if (!behind && outside) continue;
 
             // screen positions and facing (polygons crossing the near plane: after clipping)
-            float px[4], py[4];
-            const MagXform *pp[4];
-            MagXform own[4];
             float area = 0.0f, area2 = 0.0f;
             bool flat = false, reverse = false;
             if (!behind) {
-                // divide, convert and fade once per position: neighbouring faces find it done
+                // divide, convert and fade once per position
                 for (int k = 0; k < count; k++) {
-                    MagXform *e = slot[k];
-                    if (e->key1 != keyA[k] || e->key2 != keyB[k]) {      // pushed out by another corner of this polygon
-                        e = own + k;
-                        e->x = cx[k]; e->y = cy[k]; e->w = cw[k]; e->code = 0;
-                    }
-                    if (!(e->code & 64)) {
+                    MagXform *x = e[k];
+                    if (!(x->code & 64)) {
                         const short4 &c = vx[k]->coord;
-                        float r = 1.0f / e->w;
-                        e->px = e->x * r; e->py = e->y * r;
-                        int32 ix = int32(e->px * 16.0f), iy = int32(e->py * 16.0f);
-                        e->ix = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
-                        e->iy = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
+                        float r = 1.0f / x->w;
+                        x->px = x->x * r; x->py = x->y * r;
+                        int32 ix = int32(x->px * 16.0f), iy = int32(x->py * 16.0f);
+                        x->ix = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
+                        x->iy = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
                         float z = m.e20 * float(c.x) + m.e21 * float(c.y) + m.e22 * float(c.z) + m.e23;
                         int32 iz = int32(z * r * (65533.0f * 32768.0f));
-                        e->iz = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
-                        e->q = magBits(e->w) > 0x41800000 ? r : 1.0f / 16.0f;    // w > 16
-                        e->fog = ortho ? 256 : magFog(e->w);
-                        e->code |= 64;
+                        x->iz = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
+                        x->q = magBits(x->w) > 0x41800000 ? r : 1.0f / 16.0f;    // w > 16
+                        x->fog = ortho ? 256 : magFog(x->w);
+                        x->code |= 64;
                     }
-                    pp[k] = e;
-                    px[k] = e->px; py[k] = e->py;
                 }
-                float abx = px[1] - px[0], aby = py[1] - py[0], acx = px[2] - px[0], acy = py[2] - py[0];
+                float abx = e[1]->px - e[0]->px, aby = e[1]->py - e[0]->py, acx = e[2]->px - e[0]->px, acy = e[2]->py - e[0]->py;
                 area = abx * acy - acx * aby;
                 if (!isTriangle) {
                     // a parallelogram with matching texture corners: one plane fits all four
@@ -745,7 +765,7 @@ namespace GAPI {
                     flat = (uint32(A.x + C.x - B.x - D.x + 1) <= 2) && (uint32(A.y + C.y - B.y - D.y + 1) <= 2) &&
                            (uint32(A.z + C.z - B.z - D.z + 1) <= 2) &&
                            (uint32(TA.x + TC.x - TB.x - TD.x + 96) <= 192) && (uint32(TA.y + TC.y - TB.y - TD.y + 96) <= 192);
-                    float adx = px[3] - px[0], ady = py[3] - py[0];
+                    float adx = e[3]->px - e[0]->px, ady = e[3]->py - e[0]->py;
                     area2 = acx * ady - adx * acy;
                 }
                 if (flip) { area = -area; area2 = -area2; }
@@ -768,7 +788,7 @@ namespace GAPI {
                 const Vertex &v = *vx[k];
                 int32 f = lit ? magLightFactor(v) : 256;
                 if (lit) MAG_COUNT(5, lightsCount);
-                f = (f * (behind ? magFog(cw[k]) : pp[k]->fog)) >> 8;
+                f = (f * (behind ? magFog(e[k]->w) : e[k]->fog)) >> 8;
                 int32 r = v.light.x, g = v.light.y, b = v.light.z;
                 if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
                 rgb[k] = (uint32((r * f) >> 8) << 16) | (uint32((g * f) >> 8) << 8) | uint32((b * f) >> 8);
@@ -781,9 +801,9 @@ namespace GAPI {
             if (!behind) {
                 for (int k = 0; k < count; k++) {
                     const Vertex &v = *vx[k];
-                    const MagXform *e = pp[k];
+                    const MagXform *x = e[k];
                     MagVtx &o = vo[k];
-                    o.x = e->ix; o.y = e->iy; o.z = e->iz; o.q = e->q;
+                    o.x = x->ix; o.y = x->iy; o.z = x->iz; o.q = x->q;
                     o.u = v.texCoord.x * uMul - half;
                     o.v = v.texCoord.y * vMul - half;
                     o.l = l[k];
@@ -813,7 +833,7 @@ namespace GAPI {
             MagClipVtx cv[4];
             for (int k = 0; k < count; k++) {
                 const Vertex &v = *vx[k];
-                cv[k].x = cx[k]; cv[k].y = cy[k]; cv[k].w = cw[k];
+                cv[k].x = e[k]->x; cv[k].y = e[k]->y; cv[k].w = e[k]->w;
                 cv[k].z = m.e20 * float(v.coord.x) + m.e21 * float(v.coord.y) + m.e22 * float(v.coord.z) + m.e23;
                 cv[k].u = v.texCoord.x * uMul - half;
                 cv[k].v = v.texCoord.y * vMul - half;

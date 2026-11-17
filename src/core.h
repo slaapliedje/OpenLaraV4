@@ -630,11 +630,13 @@ struct MeshRange {
 #ifdef OL_ROOM_CELLS
     int cellStart;                  // its cells in gMeshCells (opaque room geometry), or cellCount 0
     int cellCount;
+    int posBase;                    // its geometry's first entry in a level-wide table of positions, or -1:
+                                    // then each vertex's coord.w is its position's number in that geometry
 #endif
 
     MeshRange() : iStart(0), iCount(0), vStart(0), aIndex(-1), tile(0), clut(0)
 #ifdef OL_ROOM_CELLS
-        , cellStart(0), cellCount(0)
+        , cellStart(0), cellCount(0), posBase(-1)
 #endif
         {}
 };
@@ -651,6 +653,10 @@ struct MeshCell {
     int   iStart, iCount;
 };
 MeshCell *gMeshCells = NULL;
+// Distinct object-space positions of all sorted geometries: posBase + coord.w < gMeshPosCount. A
+// back end can keep per-position work (transform, projection, fog) in a table of this size indexed
+// directly, instead of hashing positions.
+int gMeshPosCount = 0;
 #endif
 
 #define SHADER_ATTRIBS(E) \
