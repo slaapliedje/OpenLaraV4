@@ -503,11 +503,11 @@ namespace GAPI {
     mat4   magModel, magM;               // mModel the cache belongs to, and screenProj * mModel
     vec3   magCam;                       // camera position in object space
     vec4   magViewPos;
+    float  magPlane[6][7];               // clip planes in object space: x y z w, then |x| |y| |z|
     uint32 magLightsVersion = 1, magLightsFor = 0;   // lightsRel is current for this light set and model
 
     void DIP(Mesh *mesh, const MeshRange &range) {
         if (MAG_STAGE(4)) return;
-        MAG_COUNT(7, 1);
         const Index  *indices  = mesh->iBuffer;
         const Vertex *vertices = mesh->vBuffer;
         const int iStart = range.iStart, iCount = range.iCount, vStart = range.vStart;
@@ -572,6 +572,24 @@ namespace GAPI {
                           mModel.e01 * dx + mModel.e11 * dy + mModel.e21 * dz,
                           mModel.e02 * dx + mModel.e12 * dy + mModel.e22 * dz);
             magLightsFor = 0;
+            {   // object-space planes of the scissor rectangle, near and far: P . (x, y, z, 1) < 0 = outside
+                const float cl = float(swClipRect.x), ct = float(swClipRect.y), cr = float(swClipRect.z), cb = float(swClipRect.w);
+                const bool persp = Core::mProj.e33 != 1.0f;
+                const float r0[4] = { magM.e00, magM.e01, magM.e02, magM.e03 }, r1[4] = { magM.e10, magM.e11, magM.e12, magM.e13 },
+                            r3[4] = { magM.e30, magM.e31, magM.e32, magM.e33 };
+                for (int k = 0; k < 4; k++) {
+                    magPlane[0][k] = r0[k] - cl * r3[k];
+                    magPlane[1][k] = cr * r3[k] - r0[k];
+                    magPlane[2][k] = r1[k] - ct * r3[k];
+                    magPlane[3][k] = cb * r3[k] - r1[k];
+                    magPlane[4][k] = r3[k];
+                    magPlane[5][k] = -r3[k];
+                }
+                magPlane[4][3] -= persp ? SW_NEAR : 0.0f;
+                magPlane[5][3] += SW_MAX_DIST;
+                for (int j = 0; j < 6; j++)
+                    for (int k = 0; k < 3; k++) magPlane[j][4 + k] = fabsf(magPlane[j][k]);
+            }
             // a new stamp empties the position cache
             if (++magXformStamp == 0) { memset(magXform, 0, sizeof(magXform)); magXformStamp = 1; }
         }
@@ -598,18 +616,43 @@ namespace GAPI {
         MagVtx  *vo = magVtxBuf;
         MagPrim *po = magPrimBuf;
 
+        // Opaque room geometry comes sorted into cells (MeshBuilder::cellSort) with a box each: a cell
+        // whose box is wholly outside the scissor rectangle, behind the near plane or beyond the far
+        // distance is skipped without touching its faces. Everything else is one segment.
+    #ifdef OL_ROOM_CELLS
+        const MeshCell *cell = range.cellCount ? gMeshCells + range.cellStart : NULL;
+        const int segments = (cell && Mag::roomCells && !ortho) ? range.cellCount : 1;
+        if (segments == 1) cell = NULL;
+    #else
+        const int segments = 1;
+    #endif
+        for (int seg = 0; seg < segments; seg++) {
+        int segStart = iStart, segCount = iCount;
+    #ifdef OL_ROOM_CELLS
+        if (cell) {
+            const MeshCell &c = cell[seg];
+            bool out = false;
+            for (int k = 0; k < 6 && !out; k++) {
+                const float *P = magPlane[k];
+                out = magBits(P[0] * c.cx + P[1] * c.cy + P[2] * c.cz + P[3] + P[4] * c.ex + P[5] * c.ey + P[6] * c.ez) < 0;
+            }
+            MAG_COUNT(6, 1);
+            if (out) { MAG_COUNT(7, 1); continue; }
+            segStart = c.iStart; segCount = c.iCount;
+        }
+    #endif
         int i = 0;
-        while (i < iCount) {
-            const Index *idx = indices + iStart + i;
+        while (i < segCount) {
+            const Index *idx = indices + segStart + i;
             const Vertex *vx[4];
             vx[0] = vertices + vStart + idx[0];
             vx[1] = vertices + vStart + idx[1];
             vx[2] = vertices + vStart + idx[2];
             // quads come as two triangles 012 023
-            const bool isTriangle = vx[0]->normal.w == 1 || i + 6 > iCount || idx[3] != idx[0] || idx[4] != idx[2];
+            const bool isTriangle = vx[0]->normal.w == 1 || i + 6 > segCount || idx[3] != idx[0] || idx[4] != idx[2];
             const int count = isTriangle ? 3 : 4;
             i += isTriangle ? 3 : 6;
-            if (i > iCount) break;
+            if (i > segCount) break;
             if (!isTriangle) vx[3] = vertices + vStart + idx[5];
             MAG_COUNT(0, 1);
             magDbgCulled = false;
@@ -802,6 +845,8 @@ namespace GAPI {
                 po->n = 3; po->area = ar; po->tint = tint; po++;
             }
         }
+
+        }   // segments
 
         if (MAG_STAGE(1)) return;
         for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDraw(*pr);

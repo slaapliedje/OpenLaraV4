@@ -251,6 +251,10 @@
     #define FFP
 #endif
 
+#if defined(_GAPI_MAGGIE) && !defined(OL_NO_ROOM_CELLS)
+    #define OL_ROOM_CELLS           // opaque room geometry sorted by page and cell (see MeshBuilder::cellSort)
+#endif
+
 #ifdef FFP
     #define SPLIT_BY_TILE
     #if defined(_GAPI_GU)
@@ -623,8 +627,31 @@ struct MeshRange {
     uint16 tile;
     uint16 clut;
 
-    MeshRange() : iStart(0), iCount(0), vStart(0), aIndex(-1), tile(0), clut(0) {}
+#ifdef OL_ROOM_CELLS
+    int cellStart;                  // its cells in gMeshCells (opaque room geometry), or cellCount 0
+    int cellCount;
+#endif
+
+    MeshRange() : iStart(0), iCount(0), vStart(0), aIndex(-1), tile(0), clut(0)
+#ifdef OL_ROOM_CELLS
+        , cellStart(0), cellCount(0)
+#endif
+        {}
 };
+
+#ifdef OL_ROOM_CELLS
+// A cell: the faces of one range inside one 2048-unit cube of the room (by their first vertex),
+// with the box of all their corners in the mesh's object space. The cells of a range cover its
+// indices in order, each starting on a face, so a draw call can skip a cell outside the view.
+// The box is kept as floats, centre and half size, ready for a plane test: a box is wholly on the
+// negative side of the plane P when P.xyz . c + P.w + |P.x| e.x + |P.y| e.y + |P.z| e.z < 0.
+struct MeshCell {
+    float cx, cy, cz;               // centre
+    float ex, ey, ez;               // half size
+    int   iStart, iCount;
+};
+MeshCell *gMeshCells = NULL;
+#endif
 
 #define SHADER_ATTRIBS(E) \
     E( aCoord           ) \

@@ -192,7 +192,144 @@ struct MeshBuilder {
         BLEND_ADD   = 4,
     };
 
+#ifdef OL_ROOM_CELLS
+    MeshCell *cells;
+    int       cellsCount, cellsCap;
+
+    struct CellBox { short3 min, max; };
+
+    static void cellFinish(MeshCell &c, const CellBox &b) {
+        c.cx = (float(b.min.x) + float(b.max.x)) * 0.5f; c.ex = (float(b.max.x) - float(b.min.x)) * 0.5f;
+        c.cy = (float(b.min.y) + float(b.max.y)) * 0.5f; c.ey = (float(b.max.y) - float(b.min.y)) * 0.5f;
+        c.cz = (float(b.min.z) + float(b.max.z)) * 0.5f; c.ez = (float(b.max.z) - float(b.min.z)) * 0.5f;
+    }
+
+    struct CellFace {
+        uint16 tile, clut;
+        uint32 cell;
+        int32  iStart, n;           // first index (in the original order: also the tie-break), 3 or 6
+    };
+
+    static int cellFaceCmp(const void *pa, const void *pb) {
+        const CellFace *a = (const CellFace*)pa, *b = (const CellFace*)pb;
+        if (a->tile != b->tile) return a->tile < b->tile ? -1 : 1;
+        if (a->clut != b->clut) return a->clut < b->clut ? -1 : 1;
+        if (a->cell != b->cell) return a->cell < b->cell ? -1 : 1;
+        return a->iStart < b->iStart ? -1 : (a->iStart > b->iStart ? 1 : 0);
+    }
+
+    // Opaque room geometry (room faces and static meshes): its faces regrouped by texture page, so
+    // each page is one range (one draw call, where faces alternating between pages made several),
+    // and within a range by cell, each cell with its box (MeshCell). Faces are the groups DIP sees:
+    // 6 indices for a quad given as 012 023, otherwise 3 (Maggie's DIP uses the same rule). Each
+    // face has its own vertices, so moving whole faces keeps every face intact; the two sides of a
+    // double-sided face stay together and in order (same cell, the tie-break keeps their order).
+    // Order inside the opaque pass does not matter with the z-buffer.
+    void cellSort(Geometry &geom, Index *indices, const Vertex *vertices) {
+        if (!geom.count) return;
+        const int vStart = geom.ranges[0].vStart;
+        const int iBegin = geom.ranges[0].iStart;
+        int iEnd = iBegin;
+        for (int k = 0; k < geom.count; k++) {
+            const MeshRange &r = geom.ranges[k];
+            if (r.iStart != iEnd || r.vStart != vStart) return;      // not one contiguous span: leave it
+            iEnd += r.iCount;
+        }
+        const int total = iEnd - iBegin;
+        if (total <= 0) return;
+
+        CellFace *faces = (CellFace*)malloc(sizeof(CellFace) * (total / 3 + 1));
+        Index *sorted = (Index*)malloc(sizeof(Index) * total);
+        if (!faces || !sorted) { free(faces); free(sorted); return; }
+
+        int nFaces = 0;
+        uint32 sumBefore = 0;
+        for (int k = 0; k < geom.count; k++) {
+            const MeshRange &r = geom.ranges[k];
+            const int end = r.iStart + r.iCount;
+            int i = r.iStart;
+            while (i + 3 <= end) {
+                const Index *idx = indices + i;
+                const bool tri = vertices[vStart + idx[0]].normal.w == 1 || i + 6 > end || idx[3] != idx[0] || idx[4] != idx[2];
+                // the cell of the face's first vertex (the lowest index: every group of a face has it,
+                // so both sides of a double-sided face land in the same cell)
+                Index first = idx[0];
+                if (idx[1] < first) first = idx[1];
+                if (idx[2] < first) first = idx[2];
+                const Vertex &v0 = vertices[vStart + first];
+                CellFace &f = faces[nFaces++];
+                f.tile = r.tile; f.clut = r.clut;
+                f.cell = (uint32(uint16(v0.coord.x + 32768) >> 11) << 10) | (uint32(uint16(v0.coord.y + 32768) >> 11) << 5) |
+                          uint32(uint16(v0.coord.z + 32768) >> 11);
+                f.iStart = i; f.n = tri ? 3 : 6;
+                i += f.n;
+            }
+            if (i != end) { free(faces); free(sorted); return; }       // a range that is not whole faces
+        }
+        for (int i = iBegin; i < iEnd; i++) sumBefore += indices[i] * 2654435761u + 1;
+
+        qsort(faces, nFaces, sizeof(CellFace), cellFaceCmp);
+
+        int o = 0;
+        for (int j = 0; j < nFaces; j++)
+            for (int t = 0; t < faces[j].n; t++)
+                sorted[o++] = indices[faces[j].iStart + t];
+        uint32 sumAfter = 0;
+        for (int i = 0; i < total; i++) sumAfter += sorted[i] * 2654435761u + 1;
+        if (o != total || sumAfter != sumBefore) { free(faces); free(sorted); return; }
+
+        memcpy(indices + iBegin, sorted, sizeof(Index) * total);
+
+        // the ranges again: one per page, with its cells
+        geom.count = 0;
+        int i = iBegin;
+        CellBox box;
+        bool boxOpen = false;            // the last cell is this call's and its box not yet stored
+        for (int j = 0; j < nFaces; j++) {
+            const CellFace &f = faces[j];
+            MeshRange *r = geom.count ? &geom.ranges[geom.count - 1] : NULL;
+            if (!r || r->tile != f.tile || r->clut != f.clut) {
+                r = &geom.ranges[geom.count++];
+                r->vStart = vStart; r->iStart = i; r->iCount = 0;
+                r->tile = f.tile; r->clut = f.clut;
+                r->cellStart = cellsCount; r->cellCount = 0;
+            }
+            if (!r->cellCount || faces[j - 1].cell != f.cell) {
+                if (boxOpen) cellFinish(cells[cellsCount - 1], box);
+                if (cellsCount == cellsCap) {
+                    cellsCap = cellsCap ? cellsCap * 2 : 1024;
+                    cells = (MeshCell*)realloc(cells, sizeof(MeshCell) * cellsCap);
+                }
+                MeshCell &c = cells[cellsCount++];
+                const short4 &p = vertices[vStart + indices[i]].coord;
+                box.min = box.max = short3(p.x, p.y, p.z);
+                boxOpen = true;
+                c.iStart = i; c.iCount = 0;
+                r->cellCount++;
+            }
+            MeshCell &c = cells[cellsCount - 1];
+            for (int t = 0; t < f.n; t++) {
+                const short4 &p = vertices[vStart + indices[i + t]].coord;
+                if (p.x < box.min.x) box.min.x = p.x; if (p.x > box.max.x) box.max.x = p.x;
+                if (p.y < box.min.y) box.min.y = p.y; if (p.y > box.max.y) box.max.y = p.y;
+                if (p.z < box.min.z) box.min.z = p.z; if (p.z > box.max.z) box.max.z = p.z;
+            }
+            c.iCount += f.n;
+            r->iCount += f.n;
+            i += f.n;
+        }
+        if (boxOpen) cellFinish(cells[cellsCount - 1], box);
+        gMeshCells = cells;
+
+        free(faces);
+        free(sorted);
+    }
+#endif
+
     MeshBuilder(TR::Level *level, Texture *atlas) : atlas(atlas), level(level) {
+    #ifdef OL_ROOM_CELLS
+        cells = NULL; cellsCount = cellsCap = 0;
+    #endif
         dynMesh = new Mesh(NULL, COUNT(dynIndices), NULL, COUNT(dynVertices), 1, true);
         dynRange.vStart = 0;
         dynRange.iStart = 0;
@@ -371,6 +508,9 @@ struct MeshBuilder {
                 }
 
                 geom.finish(iCount);
+            #ifdef OL_ROOM_CELLS
+                if (transp == 0) cellSort(geom, indices, vertices);
+            #endif
             }
 
         // rooms sprites
@@ -653,6 +793,10 @@ struct MeshBuilder {
     }
 
     ~MeshBuilder() {
+    #ifdef OL_ROOM_CELLS
+        if (gMeshCells == cells) gMeshCells = NULL;
+        free(cells);
+    #endif
         for (int i = 0; i < level->roomsCount; i++)
             for (int j = 0; j < COUNT(rooms[i].dynamic); j++)
                 delete[] rooms[i].dynamic[j].faces;
