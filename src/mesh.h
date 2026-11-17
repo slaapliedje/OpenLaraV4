@@ -327,13 +327,14 @@ struct MeshBuilder {
         roomColours(indices + iBegin, total, vertices + vStart);
     }
 
-    // Static room colour (the Maggie back end's DIP, unlit and unfogged corners): what GAPI::magTint
-    // makes of a face's vertex lights each frame, made once. For each face whose vertices belong to
-    // no other face (so not the two sides of a double-sided face, whose groups would disagree), its
-    // vertices get color = (tint R, G, B, ROOM_COLOUR_DONE) and texCoord.z = the corner's intensity
-    // (l >> 15, 16..0xFFEF). DIP may use them when the draw is unlit, no corner is fogged (fog 256)
-    // and none is behind the near plane: exactly the values its own loop would make then, since
-    // light x 256 >> 8 = light. Other faces keep color.w = 255 and take the per-frame path.
+    // Static room colour (the Maggie back end's DIP, unlit corners): what GAPI::magTint makes of a
+    // face's vertex lights each frame, made once. For each face whose vertices belong to no other
+    // face (so not the two sides of a double-sided face, whose groups would disagree), its vertices
+    // get color = (tint R, G, B, ROOM_COLOUR_DONE) and texCoord.z = the corner light's largest
+    // channel (0..255, before the clamp). DIP uses them when the draw is unlit and no corner is
+    // behind the near plane, fading that channel by the corner's fog and clamping as magTint does:
+    // exactly the values its own loop would make. Other faces keep color.w = 255 and take the
+    // per-frame path.
     void roomColours(const Index *idx, int count, Vertex *vtx) {
         int maxV = 0;
         for (int i = 0; i < count; i++) if (idx[i] > maxV) maxV = idx[i];
@@ -363,8 +364,10 @@ struct MeshBuilder {
                         uint32 tint = GAPI::magTint(rgb, n, l);
                         for (int k = 0; k < n; k++) {
                             Vertex &v = vtx[c[k]];
+                            const ubyte4 &L = v.light;
+                            int m = L.x > L.y ? L.x : L.y;
                             v.color = ubyte4(uint8(tint >> 16), uint8(tint >> 8), uint8(tint), ROOM_COLOUR_DONE);
-                            v.texCoord.z = int16(uint16(l[k] >> 15));
+                            v.texCoord.z = int16(L.z > m ? L.z : m);
                         }
                     }
                 }

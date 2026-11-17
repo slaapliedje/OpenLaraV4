@@ -574,6 +574,9 @@ struct Level : IGame {
         } else {
             Core::setFog(levelFogParams);
         }
+        #ifdef _GAPI_MAGGIE
+            GAPI::magWater = room.flags.water;       // tint and murk, see DIP
+        #endif
 
         #ifdef _GAPI_SW
             GAPI::setPalette(room.flags.water ? GAPI::swPaletteWater : GAPI::swPaletteColor);
@@ -2456,7 +2459,7 @@ struct Level : IGame {
             Core::setBlendMode(bmPremult);
             renderEntitiesTransp(transp);
 
-        #ifndef FFP
+        #if !defined(FFP) || defined(_GAPI_MAGGIE)   // (the Maggie back end multiplies on the CPU)
             Core::setFog(FOG_NONE);
             Core::whiteTex->bind(sDiffuse);
             Core::setBlendMode(bmMult);

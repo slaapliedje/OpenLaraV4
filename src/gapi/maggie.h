@@ -389,7 +389,34 @@ namespace GAPI {
         }
     }
 
-    void setFog(const vec4 &params) {}
+    // Distance fog as the engine's shaders do it: colour x exp(-distance * density), density from
+    // setFog (FOG_NONE = 0 for the sky, the UI, ...). Maggie cannot add the fog colour; the levels'
+    // fog colours are black or dark (0.25 at most), so fading to black is close. A table, since the
+    // 68080 has no exponent instruction (FETOX would trap into the 060 package).
+    #define MAG_FOG_SHIFT 7              // table step: 128 units
+    #define MAG_FOG_SIZE  256            // up to 32K units
+    int32  magFogTab[MAG_FOG_SIZE + 1];
+    float  magFogDensity = -1.0f;        // the table's density; < 0 = none built yet
+    bool   magFogOn = false, magFogDirty = true;
+
+    // Under water (the room being drawn is a water room, set by the level's room setup): colours
+    // x (0.6, 0.9, 0.9), as the engine's shaders do.
+    bool  magWater = false;
+    float magFogFloor = 0.0f;
+
+    void setFog(const vec4 &params) {
+        float d = params.w;
+        // Maggie can only darken: a fade towards a fog colour becomes a fade to that colour's brightness
+        float c = d > 0.0f ? max(params.x, max(params.y, params.z)) : 0.0f;
+        if (d == magFogDensity && c == magFogFloor) return;
+        magFogDensity = d; magFogFloor = c;
+        magFogOn = d > 0.0f;
+        magFogDirty = true;              // positions cached under the old density carry its fade
+        for (int i = 0; i <= MAG_FOG_SIZE; i++) {
+            float f = magFogOn ? expf(-float(i << MAG_FOG_SHIFT) * d) : 1.0f;
+            magFogTab[i] = int32(256.0f * (f + (1.0f - f) * c) + 0.5f);
+        }
+    }
 
     void transformLights() {
         memcpy(lightsRel, lights, sizeof(LightSW) * lightsCount);
@@ -415,7 +442,8 @@ namespace GAPI {
     int32 magScreenW = 0, magScreenH = 0;
 
     // Fixed-function lighting: with lights on, colour x (ambient + lights); without, the colour as
-    // it is (rooms and sprites carry their light in the vertices). Returns 0..256.
+    // it is (rooms and sprites carry their light in the vertices). Returns 0..512: the shaders let
+    // light go to twice the texture, and the fog is applied before anything is clamped.
     inline int32 magLightFactor(const Vertex &vx) {
         float x = float(vx.coord.x), y = float(vx.coord.y), z = float(vx.coord.z);
         float nx = float(vx.normal.x), ny = float(vx.normal.y), nz = float(vx.normal.z);    // length 32767
@@ -430,14 +458,14 @@ namespace GAPI {
             sum += lum * (1.0f - att) * light.intensity / sqrtf(att);
         }
         int32 f = int32((ambient + sum * (1.0f / 32767.0f)) * 256.0f);
-        return f > 256 ? 256 : f;
+        return f > 512 ? 512 : f;
     }
 
-    // distance fade to black, 0..256
+    // distance fade to black, 0..256 (w: view depth, close to the shaders' distance)
     inline int32 magFog(float w) {
-        if (magBits(w) <= magBits(SW_FOG_START)) return 256;
-        float f = 1.0f - (w - SW_FOG_START) * (1.0f / (SW_MAX_DIST - SW_FOG_START));
-        return magBits(f) > 0 ? int32(f * 256.0f) : 0;
+        if (!magFogOn || magBits(w) <= 0) return 256;
+        int32 i = int32(w) >> MAG_FOG_SHIFT;
+        return magFogTab[i < MAG_FOG_SIZE ? i : MAG_FOG_SIZE];
     }
 
     struct MagClipVtx {
@@ -509,6 +537,29 @@ namespace GAPI {
     float  magPlane[6][7];               // clip planes in object space: x y z w, then |x| |y| |z|
     uint32 magLightsVersion = 1, magLightsFor = 0;   // lightsRel is current for this light set and model
 
+    // Multiply blending (Lara's blob shadow): Maggie has no blending on current cores, and the CPU
+    // cannot read back what Maggie drew (stale data cache), so the shadow is a screen-door of black
+    // pixels - one in four in the middle, one in eight in the fading ring - from two 32x32 textures
+    // mapped one texel per pixel.
+    uint8 *magStippleMem[2] = { NULL, NULL }, *magStipple[2] = { NULL, NULL };
+
+    bool magStippleInit() {
+        if (magStipple[0] && magStipple[1]) return true;
+        uint8 *rgba = new uint8[32 * 32 * 4];
+        for (int t = 0; t < 2; t++) {
+            for (int y = 0; y < 32; y++)
+                for (int x = 0; x < 32; x++) {
+                    bool on = t == 0 ? ((x + 2 * y) & 3) == 0 : ((y & 1) == 0 && ((x + y) & 3) == 0);
+                    uint8 *o = rgba + (y * 32 + x) * 4;
+                    o[0] = o[1] = o[2] = 0; o[3] = on ? 255 : 0;
+                }
+            if (!magStipple[t]) magStipple[t] = Mag::allocTex(32 * 32 / 2, &magStippleMem[t]);
+            if (magStipple[t]) Mag::encodeRGBA(rgba, 32, 32, magStipple[t], true);
+        }
+        delete[] rgba;
+        return magStipple[0] && magStipple[1];
+    }
+
     void DIP(Mesh *mesh, const MeshRange &range) {
         if (MAG_STAGE(4)) return;
         const Index  *indices  = mesh->iBuffer;
@@ -562,9 +613,10 @@ namespace GAPI {
             magScreenW = Core::width; magScreenH = Core::height;
             magScreenProjValid = true;
         }
-        if (!sameView || magXformStamp == 0 || memcmp(&mModel, &magModel, sizeof(mat4)) != 0 ||
+        if (!sameView || magXformStamp == 0 || magFogDirty || memcmp(&mModel, &magModel, sizeof(mat4)) != 0 ||
             memcmp(&Core::viewPos, &magViewPos, sizeof(vec4)) != 0 ||
             memcmp(&swClipRect, &magXformClip, sizeof(short4)) != 0) {
+            magFogDirty = false;
             magModel = mModel;
             magViewPos = Core::viewPos;
             magXformClip = swClipRect;
@@ -793,11 +845,13 @@ namespace GAPI {
             int32  l[4];
             uint32 tint;
         #ifdef ROOM_COLOUR_DONE
-            if (!lit && !clip && vx[0]->color.w == ROOM_COLOUR_DONE && e[0]->fog == 256 && e[1]->fog == 256 && e[2]->fog == 256 &&
-                (count == 3 || e[3]->fog == 256)) {
+            if (!lit && !clip && vx[0]->color.w == ROOM_COLOUR_DONE) {
                 const ubyte4 &c = vx[0]->color;
                 tint = (uint32(c.x) << 16) | (uint32(c.y) << 8) | c.z;
-                for (int k = 0; k < count; k++) l[k] = int32(uint16(vx[k]->texCoord.z)) << 15;
+                for (int k = 0; k < count; k++) {
+                    int32 i = ((vx[k]->texCoord.z * e[k]->fog) >> 8) * 514;     // as the loop below and magTint
+                    l[k] = (i < 16 ? 16 : (i > 0xFFEF ? 0xFFEF : i)) << 15;
+                }
             } else
         #endif
             {
@@ -808,10 +862,16 @@ namespace GAPI {
                     f = (f * (behind ? magFog(e[k]->w) : e[k]->fog)) >> 8;
                     int32 r = v.light.x, g = v.light.y, b = v.light.z;
                     if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
-                    rgb[k] = (uint32((r * f) >> 8) << 16) | (uint32((g * f) >> 8) << 8) | uint32((b * f) >> 8);
+                    r = (r * f) >> 8; g = (g * f) >> 8; b = (b * f) >> 8;            // f may be up to 512
+                    if ((r | g | b) > 255) { r = r > 255 ? 255 : r; g = g > 255 ? 255 : g; b = b > 255 ? 255 : b; }
+                    rgb[k] = (uint32(r) << 16) | (uint32(g) << 8) | uint32(b);
                 }
                 tint = magTint(rgb, count, l);
             }
+            if (magWater && !ortho)
+                tint = ((((tint >> 16) & 255) * 154 >> 8) << 16) | ((((tint >> 8) & 255) * 230 >> 8) << 8) | ((tint & 255) * 230 >> 8);
+            if (blendMul)                    // how dark: the vertex colour, black in the middle (see the draw below)
+                for (int k = 0; k < count; k++) l[k] = int32(vx[k]->light.x) << 16;
             // all corners on one texel: a plain coloured face (UI bars and frames)
             if (vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
                 vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y) tint |= 0x01000000;
@@ -950,6 +1010,26 @@ namespace GAPI {
     #ifdef OL_EMU
         const uint16 pickBefore = Mag::pickX >= 0 ? swColor[Mag::pickY * Core::width + Mag::pickX] : 0;
     #endif
+        if (blendMul) {
+            if (po == magPrimBuf || !magStippleInit()) return;
+            // dense where every corner is dark; then texture = screen position, one texel per pixel
+            for (MagPrim *pr = magPrimBuf; pr < po; pr++) {
+                int32 sum = 0;
+                for (int k = 0; k < pr->n; k++) sum += pr->v[k]->l >> 16;
+                pr->tint = sum < 64 * pr->n ? 0 : 1;
+            }
+            for (MagVtx *v = magVtxBuf; v < vo; v++) { v->u = v->x << 15; v->v = v->y << 15; v->q = 1.0f; v->l = 0x7FFF << 15; }
+            Mag::setMode(0x0004 | (needZ ? 0x000A : 0));     // nearest, depth tested but not written
+            const uint8 *keepTex = magDipTex; const uint16 keepSize = magDipSize;
+            magDipSize = 5;
+            for (MagPrim *pr = magPrimBuf; pr < po; pr++) {
+                magDipTex = magStipple[pr->tint];
+                pr->tint = 0;
+                magDraw(*pr);
+            }
+            magDipTex = (uint8*)keepTex; magDipSize = keepSize;
+            return;
+        }
         for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDraw(*pr);
     #ifdef OL_EMU
         if (Mag::pickX >= 0 && swColor[Mag::pickY * Core::width + Mag::pickX] != pickBefore)

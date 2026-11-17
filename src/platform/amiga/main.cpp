@@ -517,6 +517,9 @@ __attribute__((noinline)) static int olMain()
     if (level && (!level[0] || !strcmp(level, "-"))) level = NULL;
     printf("loading %s\n", level ? level : "title");
     int t0 = osGetTimeMS();
+    // scripted runs: loading "takes" 7.7 s on the virtual clock whatever the machine (the GL reference
+    // build does the same), so loop numbers and frames match between the V4, the emulator and the PC
+    if (headlessFrames && __argc > 4) fakeTimeMS = 7700;
     Game::init(level);
     printf("init %d ms\n", osGetTimeMS() - t0);
 
