@@ -7,6 +7,13 @@
 
 //#define TEST_SLOW_FIO
 
+// OL_FASTMATH: cheaper sincos, matrix and joint code for slow FPUs (68060/68080), from the
+// Imagine32 port: float sincos (within 9e-8 for |x| < 100), translate/scale/rotate on the
+// columns they change, rotYXZ straight to a quaternion, joints as bases, keyframe joints cached
+#if defined(_OS_AMIGA) && !defined(OL_NO_FASTMATH)
+    #define OL_FASTMATH
+#endif
+
 #ifdef _DEBUG
     #if defined(_OS_WP8)
         #define debugBreak() /* TODO */
@@ -80,6 +87,24 @@
     #define cosf(x)         vfpu_cosf(x)
     #define atan2f(x, y)    vfpu_atan2f(x, y)
     #define sincos(a, s, c) vfpu_sincos(a, s, c)
+#elif defined(OL_FASTMATH)
+    /* In floats: the SDK's sincosf works in doubles, to the last bit.  A
+     * quarter turn's reduction (pi/2 in two parts) and short polynomials:
+     * within 9e-8 of the true values for |x| < 100. */
+    void sincos(float x, float *s, float *c) {
+        float q = x * 0.63661977f;
+        int k = int(q + (q >= 0.0f ? 0.5f : -0.5f));
+        float r = (x - float(k) * 1.5703125f) - float(k) * 4.8382679e-4f;
+        float r2 = r * r;
+        float sn = r + r * r2 * (-1.6666654e-1f + r2 * (8.3321608e-3f + r2 * -1.9515296e-4f));
+        float cs = 1.0f + r2 * (-0.5f + r2 * (4.1666645e-2f + r2 * (-1.3887316e-3f + r2 * 2.4433157e-5f)));
+        switch (k & 3) {
+            case 0  : *s =  sn; *c =  cs; break;
+            case 1  : *s =  cs; *c = -sn; break;
+            case 2  : *s = -sn; *c = -cs; break;
+            default : *s = -cs; *c =  sn; break;
+        }
+    }
 #else
     void sincos(float r, float *s, float *c) {
         *s = sinf(r);
@@ -248,7 +273,10 @@ float normalizeAngle(float angle) {
 }
 
 int angleQuadrant(float angle, float offset) {
-    return int(normalizeAngle(angle + PI * offset) / (PI * 0.5f));
+    // & 3: normalizeAngle can return PI2 itself, quadrant 4, which indexed
+    // past Collision's four corners (garbage positions, a hang in
+    // Lara::updatePosition's distance loop)
+    return int(normalizeAngle(angle + PI * offset) / (PI * 0.5f)) & 3;
 }
 
 float decrease(float delta, float &value, float &speed) {
@@ -899,6 +927,22 @@ struct mat4 {
             e30 * v.x + e31 * v.y + e32 * v.z + e33 * v.w);
     }
 
+#ifdef OL_FASTMATH
+    /* The same products with the identity's zeros left out: a full 4x4
+     * product costs the 68060 about 2,500 cycles. */
+    void translate(const vec3 &offset) {
+        e03 += e00 * offset.x + e01 * offset.y + e02 * offset.z;
+        e13 += e10 * offset.x + e11 * offset.y + e12 * offset.z;
+        e23 += e20 * offset.x + e21 * offset.y + e22 * offset.z;
+        e33 += e30 * offset.x + e31 * offset.y + e32 * offset.z;
+    };
+
+    void scale(const vec3 &factor) {
+        e00 *= factor.x; e10 *= factor.x; e20 *= factor.x; e30 *= factor.x;
+        e01 *= factor.y; e11 *= factor.y; e21 *= factor.y; e31 *= factor.y;
+        e02 *= factor.z; e12 *= factor.z; e22 *= factor.z; e32 *= factor.z;
+    }
+#else
     void translate(const vec3 &offset) {
         mat4 m;
         m.identity();
@@ -914,7 +958,37 @@ struct mat4 {
         m.e22 = factor.z;
         *this = *this * m;
     }
+#endif
 
+#ifdef OL_FASTMATH
+    /* The same products, on the two columns they change (see translate). */
+    void rotateX(float angle) {
+        float s, c, a, b;
+        sincos(angle, &s, &c);
+        a = e01 * c + e02 * s; b = e02 * c - e01 * s; e01 = a; e02 = b;
+        a = e11 * c + e12 * s; b = e12 * c - e11 * s; e11 = a; e12 = b;
+        a = e21 * c + e22 * s; b = e22 * c - e21 * s; e21 = a; e22 = b;
+        a = e31 * c + e32 * s; b = e32 * c - e31 * s; e31 = a; e32 = b;
+    }
+
+    void rotateY(float angle) {
+        float s, c, a, b;
+        sincos(angle, &s, &c);
+        a = e00 * c - e02 * s; b = e02 * c + e00 * s; e00 = a; e02 = b;
+        a = e10 * c - e12 * s; b = e12 * c + e10 * s; e10 = a; e12 = b;
+        a = e20 * c - e22 * s; b = e22 * c + e20 * s; e20 = a; e22 = b;
+        a = e30 * c - e32 * s; b = e32 * c + e30 * s; e30 = a; e32 = b;
+    }
+
+    void rotateZ(float angle) {
+        float s, c, a, b;
+        sincos(angle, &s, &c);
+        a = e00 * c + e01 * s; b = e01 * c - e00 * s; e00 = a; e01 = b;
+        a = e10 * c + e11 * s; b = e11 * c - e10 * s; e10 = a; e11 = b;
+        a = e20 * c + e21 * s; b = e21 * c - e20 * s; e20 = a; e21 = b;
+        a = e30 * c + e31 * s; b = e31 * c - e30 * s; e30 = a; e31 = b;
+    }
+#else
     void rotateX(float angle) {
         mat4 m;
         m.identity();
@@ -944,6 +1018,7 @@ struct mat4 {
         m.e10 = s;  m.e11 = c;
         *this = *this * m;
     }
+#endif
 
     void rotateYXZ(const vec3 &angle) {
         float s, c, a, b;
@@ -1255,12 +1330,26 @@ struct short4 {
     inline int16& operator [] (int index) const { ASSERT(index >= 0 && index <= 3); return ((int16*)this)[index]; }
 };
 
+#ifdef OL_FASTMATH
+/* The quaternion straight from the half angles, qY qX qZ: the same rotation
+ * as the matrix's (within 1.3e-5 on 200,000 random angles), without a
+ * matrix and getRot's square root. */
+quat rotYXZ(const vec3 &angle) {
+    float sy = 0.0f, cy = 1.0f, sx = 0.0f, cx = 1.0f, sz = 0.0f, cz = 1.0f;
+    if (angle.y != 0.0f) sincos(angle.y * 0.5f, &sy, &cy);  // zeros are common
+    if (angle.x != 0.0f) sincos(angle.x * 0.5f, &sx, &cx);
+    if (angle.z != 0.0f) sincos(angle.z * 0.5f, &sz, &cz);
+    float x = cy * sx, y = sy * cx, z = -sy * sx, w = cy * cx;     // qY qX
+    return quat(x * cz + y * sz, y * cz - x * sz, z * cz + w * sz, w * cz - z * sz);
+}
+#else
 quat rotYXZ(const vec3 &angle) {
     mat4 m;
     m.identity();
     m.rotateYXZ(angle);
     return m.getRot();
 }
+#endif
 
 quat lerpAngle(const vec3 &a, const vec3 &b, float t) { // TODO: optimization
 

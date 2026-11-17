@@ -22,9 +22,38 @@ struct Animation {
     quat            *overrides;   // left & right arms animation frames
     int             overrideMask;
 
-    Animation() : level(NULL), model(NULL), anims(NULL), frameA(NULL), frameB(NULL), overrides(NULL) {}
+#ifdef OL_FASTMATH
+    /* The keyframes' joint rotations, two frames' worth: a pair of
+     * keyframes is drawn several times (TR animates at 30 Hz, often a
+     * keyframe every second tick), and each joint's rotYXZ costs three
+     * sincos; as the animation moves on, the old second frame is the new
+     * first.  Each joint's is made when first asked for. */
+    const TR::AnimFrame *qFrame[2];
+    uint32          qValid[2];
+    quat            qJoint[2][32];
+
+    quat frameJoint(const TR::AnimFrame *f, const TR::AnimFrame *other, int joint) {
+        int s = qFrame[0] == f ? 0 : (qFrame[1] == f ? 1 : -1);
+        if (s < 0) {
+            s = qFrame[0] == other ? 1 : 0;     // keep the other frame's
+            qFrame[s] = f;
+            qValid[s] = 0;
+        }
+        if (!(qValid[s] & (1u << joint))) {
+            qJoint[s][joint] = rotYXZ(((TR::AnimFrame*)f)->getAngle(level->version, joint));
+            qValid[s] |= 1u << joint;
+        }
+        return qJoint[s][joint];
+    }
+    #define OL_ANIM_CACHE_INIT qFrame[0] = qFrame[1] = NULL; qValid[0] = qValid[1] = 0;
+#else
+    #define OL_ANIM_CACHE_INIT
+#endif
+
+    Animation() : level(NULL), model(NULL), anims(NULL), frameA(NULL), frameB(NULL), overrides(NULL) { OL_ANIM_CACHE_INIT }
 
     Animation(TR::Level *level, const TR::Model *model, bool smooth = true) : level(level), model(NULL), anims(NULL), frameA(NULL), frameB(NULL), smooth(smooth), overrides(NULL), overrideMask(0) {
+        OL_ANIM_CACHE_INIT
         setModel(model);
     }
 
@@ -248,9 +277,66 @@ struct Animation {
     }
 
     quat getJointRot(int joint) {
+    #ifdef OL_FASTMATH
+        if (joint < 32)
+            return frameJoint(frameA, frameB, joint).lerp(frameJoint(frameB, frameA, joint), delta);
+    #endif
         return lerpAngle(frameA->getAngle(level->version, joint), frameB->getAngle(level->version, joint), delta);
     }
 
+#ifdef OL_FASTMATH
+    /* The joints as bases (a quaternion and a position) all the way, not
+     * matrices: each joint's rotation composed and normalised once, where
+     * setRot(getRot() * q) took a matrix to a quaternion and back (two
+     * square roots and a division a joint, with the Basis made of it). */
+    Basis getJoints(const mat4 &matrix, int joint, bool postRot = false, Basis *joints = NULL) {
+        Basis basis(matrix);
+
+        ASSERT(model);
+        vec3 offset = isPrepareToNext ? this->offset : vec3(0.0f);
+        basis.translate(((vec3)frameA->pos).lerp(offset + frameB->pos, delta));
+
+        TR::Node *node = (int)model->node < level->nodesDataSize ? (TR::Node*)&level->nodesData[model->node] : NULL;
+
+        int sIndex = 0;
+        Basis stack[16];
+
+        for (int i = 0; i < model->mCount; i++) {
+
+            if (i > 0 && node) {
+                TR::Node &t = node[i - 1];
+
+                if (t.flags & 0x01) basis = stack[--sIndex];
+                if (t.flags & 0x02) stack[sIndex++] = basis;
+
+                ASSERT(sIndex >= 0 && sIndex < COUNT(stack));
+
+                basis.translate(vec3((float)t.x, (float)t.y, (float)t.z));
+            }
+
+            if (i == joint && !postRot)
+                return basis;
+
+            quat q;
+            if (overrideMask & (1 << i))
+                q = overrides[i];
+            else
+                q = getJointRot(i);
+
+            q = basis.rot * q;
+            float n = q.dot(q);
+            basis.rot = (n > 0.0f) ? q * (1.0f / sqrtf(n)) : q;
+
+            if (i == joint && postRot)
+                return basis;
+
+            if (joints)
+                joints[i] = basis;
+        }
+
+        return basis;
+    }
+#else
     Basis getJoints(const mat4 &matrix, int joint, bool postRot = false, Basis *joints = NULL) {
         mat4 basis = matrix;
 
@@ -296,6 +382,7 @@ struct Animation {
 
         return basis;
     }
+#endif
 
     Box getBoundingBox(const vec3 &pos, int dir) {
         if (!model)
