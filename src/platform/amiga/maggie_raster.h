@@ -176,6 +176,64 @@
         L.yEnd = R.yEnd = y;
         const int32 pitch = Core::width;
         int32 lineOffset = y * pitch;
+
+        if (affine) {
+            // The common case, all integers. Texture and depth steps go to Maggie once; a triangle's
+            // light is a plane too (one step for the polygon), a quad's runs down its edges.
+            const bool zs = Mag::zSpan, lightPlane = n == 3;
+            int32 dlx = 0, dlY = 0;
+            uint32 lRow = 0;
+            bool first = true;               // the per-polygon registers go out with the first span: an earlier
+                                             // write would wait for the span in flight instead of working beside it
+            if (lightPlane) {
+                float fb = float(b->l - a->l), fc = float(c->l - a->l);
+                dlx = int32(fb * kbx + fc * kcx);
+                dlY = int32(fb * kby + fc * kcy);
+                lRow = uint32(a->l + (dlx >> 4) * fx + (dlY >> 4) * fy) + uint32(dyRow) * uint32(dlY) - uint32(X0) * uint32(dlx);
+            }
+            for (; y < yEnd; y++, lineOffset += pitch) {
+                if (y >= L.yEnd && !magEdgeNext(L, p, n, n - 1, y, bot)) break;
+                if (y >= R.yEnd && !magEdgeNext(R, p, n, 1, y, bot)) break;
+                int32 xa = (L.x + 0x7FFF) >> 16, xb = (R.x + 0x7FFF) >> 16;
+                int32 xs = xa < clipX1 ? clipX1 : xa;
+                int32 xe = xb > clipX2 ? clipX2 : xb;
+                int32 len = xe - xs;
+                if (len > 0) {
+                    int32 l;
+                    if (lightPlane) {
+                        l = int32((lRow + uint32(xs) * uint32(dlx)) >> 15);
+                        if (uint32(l) > 0xFFFF) l = l < 0 ? 0 : 0xFFFF;    // (a rounding step outside the range)
+                    } else {
+                        int32 w = xb - xa;
+                        int32 la = L.l >> 16, d = (R.l >> 16) - la, dl;
+                        if (w < 1024) {
+                            uint32 r = Mag::rcpi[w];
+                            dl = d >= 0 ? int32((uint32(d) * r) >> 16) : -int32((uint32(-d) * r) >> 16);
+                            if (dl > 16383) dl = 16383;
+                            if (dl < -16383) dl = -16383;
+                        } else
+                            dl = d / w;
+                        l = (la + dl * (xs - xa)) << 1;
+                        Mag::lightStep(dl << 1);
+                    }
+                    if (first) {
+                        first = false;
+                        Mag::polySteps(du, dv, dz2);
+                        if (lightPlane) Mag::lightStep(dlx / 32768);     // towards zero: a span's light stays between its ends
+                    }
+                    int32 offset = lineOffset + xs;
+                    Mag::spanSteps(swColor + offset, len, int32(uRow + uint32(xs) * uint32(du)), int32(vRow + uint32(xs) * uint32(dv)),
+                                   l, offset, (zRow + uint32(xs) * uint32(dz)) << 1, zs);
+                }
+                L.x += L.sx; L.l += L.sl;
+                R.x += R.sx; R.l += R.sl;
+                zRow += uint32(dzY);
+                uRow += uint32(duY); vRow += uint32(dvY);
+                lRow += uint32(dlY);
+            }
+            return;
+        }
+
         for (; y < yEnd; y++, lineOffset += pitch) {
             if (y >= L.yEnd && !magEdgeNext(L, p, n, n - 1, y, bot)) break;
             if (y >= R.yEnd && !magEdgeNext(R, p, n, 1, y, bot)) break;

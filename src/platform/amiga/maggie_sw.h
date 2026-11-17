@@ -440,7 +440,34 @@ namespace Mag {
         m->vDelta = dv;
         m->light = uint16(L);
         m->lightDelta = int16(dl);
-        m->startLength = uint16(len);
+        m->startLength = uint16(MAG_STAGE(10) ? 1 : len);
+    }
+
+    // Affine polygons: the texture and depth steps are the same for every span, so they are written
+    // once per polygon (the registers keep their values) and a span is then 5-7 writes.
+    __attribute__((always_inline)) inline void polySteps(int32 du, int32 dv, int32 dz) {
+        if (MAG_STAGE(2)) return;
+        volatile Regs *m = MAG_REGS;
+        m->uDelta = du;
+        m->vDelta = dv;
+        if (zSpan) m->depthDelta = dz;
+    }
+
+    __attribute__((always_inline)) inline void lightStep(int32 dl) {
+        if (MAG_STAGE(2)) return;
+        MAG_REGS->lightDelta = int16(dl);
+    }
+
+    __attribute__((always_inline)) inline void spanSteps(uint16 *dst, int32 len, int32 u, int32 v, int32 L, int32 offset, uint32 z, bool zs) {
+        MAG_COUNT(3, 1); MAG_COUNT(4, len);
+        if (MAG_STAGE(2)) return;
+        volatile Regs *m = MAG_REGS;     // first write waits for the previous span
+        if (zs) { m->depthDest = zbuf + offset; m->depthStart = z; }
+        m->pixDest = dst;
+        m->uCoord = u;
+        m->vCoord = v;
+        m->light = uint16(L);
+        m->startLength = uint16(MAG_STAGE(10) ? 1 : len);
     }
 
 #ifdef OL_EMU
