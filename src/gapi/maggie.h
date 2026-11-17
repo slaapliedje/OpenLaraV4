@@ -45,6 +45,8 @@ namespace GAPI {
 
     float  ambient;
     int32  lightsCount;
+    extern uint32 magLightsVersion;
+    uint32 magRcp255[256];               // (255 << 16) / n, rounded up so n * rcp >> 16 = 255
     struct LightSW {
         float  intensity;                // 0..1
         vec3   pos;
@@ -271,6 +273,8 @@ namespace GAPI {
         support.texMinSize     = 32;         // Maggie's smallest texture
 
         if (!Mag::init()) LOG("! Maggie: no memory\n");
+        magRcp255[0] = 0;
+        for (int i = 1; i < 256; i++) magRcp255[i] = ((255u << 16) + i - 1) / i;
         swClipRect = short4(0, 0, Core::width, Core::height);
     }
 
@@ -370,6 +374,7 @@ namespace GAPI {
 
     void updateLights(vec4 *lightPos, vec4 *lightColor, int count) {
         ambient = clamp(active.material.y, 0.0f, 1.0f);
+        if (++magLightsVersion == 0) magLightsVersion = 1;
 
         lightsCount = 0;
         for (int i = 0; i < count; i++) {
@@ -476,7 +481,8 @@ namespace GAPI {
         }
         if (grey || best == 0) return 0xFFFFFF;
         int32 r = (rgb[bi] >> 16) & 255, g = (rgb[bi] >> 8) & 255, b = rgb[bi] & 255;
-        return uint32((r * 255 / best) << 16) | uint32((g * 255 / best) << 8) | uint32(b * 255 / best);
+        const uint32 k = magRcp255[best];            // 255 / best, 16.16
+        return (((r * k) >> 16) << 16) | (((g * k) >> 16) << 8) | ((b * k) >> 16);
     }
 
     bool magDbgCulled = false;
@@ -486,11 +492,18 @@ namespace GAPI {
     struct MagXform {
         uint32 key1, key2;               // x, y / z, stamp
         float  x, y, w;                  // screen space times w
-        int32  code;
+        int32  code;                     // clip bits; bit 6: the projected values below are filled in
+        float  px, py;                   // pixels
+        int32  ix, iy, iz;               // as MagVtx
+        float  q;
+        int32  fog;                      // distance fade, 0..256
     } magXform[MAG_XFORM_SIZE];
     uint16 magXformStamp = 0;
-    mat4   magXformMatrix;
     short4 magXformClip;
+    mat4   magModel, magM;               // mModel the cache belongs to, and screenProj * mModel
+    vec3   magCam;                       // camera position in object space
+    vec4   magViewPos;
+    uint32 magLightsVersion = 1, magLightsFor = 0;   // lightsRel is current for this light set and model
 
     void DIP(Mesh *mesh, const MeshRange &range) {
         if (MAG_STAGE(4)) return;
@@ -534,19 +547,38 @@ namespace GAPI {
         }
         if (!magVtxBuf || !magPrimBuf) { magVtxCap = magPrimCap = 0; return; }
 
-        // object space -> screen space times w
-        if (!magScreenProjValid || magScreenW != Core::width || magScreenH != Core::height ||
-            memcmp(&magViewProj, &mViewProj, sizeof(mat4)) != 0) {
+        // Everything that depends only on the matrices is kept while they stay the same: a room's draw
+        // calls (one per texture tile) share them, and many of their corners.
+        bool sameView = magScreenProjValid && magScreenW == Core::width && magScreenH == Core::height &&
+                        memcmp(&magViewProj, &mViewProj, sizeof(mat4)) == 0;
+        if (!sameView) {
             mat4 vp;
             vp.viewport(0.0f, (float)Core::height, (float)Core::width, -(float)Core::height, 0.0f, 1.0f);
-            magScreenProj = vp * mViewProj;
+            magScreenProj = vp * mViewProj;          // object space -> screen space times w
             magViewProj = mViewProj;
             magScreenW = Core::width; magScreenH = Core::height;
             magScreenProjValid = true;
         }
-        const mat4 m = magScreenProj * mModel;
+        if (!sameView || magXformStamp == 0 || memcmp(&mModel, &magModel, sizeof(mat4)) != 0 ||
+            memcmp(&Core::viewPos, &magViewPos, sizeof(vec4)) != 0 ||
+            memcmp(&swClipRect, &magXformClip, sizeof(short4)) != 0) {
+            magModel = mModel;
+            magViewPos = Core::viewPos;
+            magXformClip = swClipRect;
+            magM = magScreenProj * mModel;
+            // the camera in object space: the model matrix is a rotation and a translation
+            float dx = Core::viewPos.x - mModel.e03, dy = Core::viewPos.y - mModel.e13, dz = Core::viewPos.z - mModel.e23;
+            magCam = vec3(mModel.e00 * dx + mModel.e10 * dy + mModel.e20 * dz,
+                          mModel.e01 * dx + mModel.e11 * dy + mModel.e21 * dz,
+                          mModel.e02 * dx + mModel.e12 * dy + mModel.e22 * dz);
+            magLightsFor = 0;
+            // a new stamp empties the position cache
+            if (++magXformStamp == 0) { memset(magXform, 0, sizeof(magXform)); magXformStamp = 1; }
+        }
+        const mat4 &m = magM;
+        const uint32 stamp = magXformStamp;
         const bool lit = lightsCount > 0 && !MAG_STAGE(3);
-        if (lit) transformLights();
+        if (lit && magLightsFor != magLightsVersion) { transformLights(); magLightsFor = magLightsVersion; }
 
         const float clipL = float(swClipRect.x), clipT = float(swClipRect.y), clipR = float(swClipRect.z), clipB = float(swClipRect.w);
         // orthographic projections (UI, 2D) have w = 1 everywhere: only perspective ones get the near plane
@@ -559,19 +591,8 @@ namespace GAPI {
         // Faces whose corners share one normal carry their face normal (room geometry): those facing
         // away from the camera are dropped before any corner is transformed.
         const bool normalCull = !ortho && !cullNone && Mag::normalCull;
-        vec3 camPos(0.0f);
-        if (normalCull) camPos = mModel.inverseOrtho() * Core::viewPos.xyz();
-        const float camX = camPos.x, camY = camPos.y, camZ = camPos.z;
+        const float camX = magCam.x, camY = magCam.y, camZ = magCam.z;
         const float cullSide = flip ? -1.0f : 1.0f;
-
-        // a new stamp empties the transform cache: whenever the matrix changes (a room's draw calls,
-        // one per texture tile, share it and many of their corners)
-        if (magXformStamp == 0 || memcmp(&m, &magXformMatrix, sizeof(mat4)) != 0 || memcmp(&swClipRect, &magXformClip, sizeof(short4)) != 0) {
-            magXformMatrix = m;
-            magXformClip = swClipRect;
-            if (++magXformStamp == 0) { memset(magXform, 0, sizeof(magXform)); magXformStamp = 1; }
-        }
-        const uint32 stamp = magXformStamp;
 
         if (MAG_STAGE(8)) return;
         MagVtx  *vo = magVtxBuf;
@@ -606,6 +627,8 @@ namespace GAPI {
             MAG_COUNT(1, count);
 
             float cx[4], cy[4], cw[4];
+            MagXform *slot[4];
+            uint32 keyA[4], keyB[4];
             int32 behind = 0, outside = 15, tooFar = 0;
             for (int k = 0; k < count; k++) {
                 // neighbouring faces repeat the same positions: look the corner up before transforming it
@@ -629,9 +652,10 @@ namespace GAPI {
                              (wb > farBits ? 16 : 0) | (wb < nearBits ? 32 : 0);
                 }
                 cx[k] = e.x; cy[k] = e.y; cw[k] = e.w;
+                slot[k] = &e; keyA[k] = key1; keyB[k] = key2;
                 outside &= e.code;
                 tooFar |= e.code & 16;
-                behind += e.code >> 5;
+                behind += (e.code >> 5) & 1;
             }
             if ((tooFar && !ortho) || behind == count) continue;
             if (MAG_STAGE(5)) continue;
@@ -639,13 +663,35 @@ namespace GAPI {
             if (!behind && outside) continue;
 
             // screen positions and facing (polygons crossing the near plane: after clipping)
-            float px[4], py[4], iw[4];
+            float px[4], py[4];
+            const MagXform *pp[4];
+            MagXform own[4];
             float area = 0.0f, area2 = 0.0f;
             bool flat = false, reverse = false;
             if (!behind) {
+                // divide, convert and fade once per position: neighbouring faces find it done
                 for (int k = 0; k < count; k++) {
-                    float r = 1.0f / cw[k];
-                    iw[k] = r; px[k] = cx[k] * r; py[k] = cy[k] * r;
+                    MagXform *e = slot[k];
+                    if (e->key1 != keyA[k] || e->key2 != keyB[k]) {      // pushed out by another corner of this polygon
+                        e = own + k;
+                        e->x = cx[k]; e->y = cy[k]; e->w = cw[k]; e->code = 0;
+                    }
+                    if (!(e->code & 64)) {
+                        const short4 &c = vx[k]->coord;
+                        float r = 1.0f / e->w;
+                        e->px = e->x * r; e->py = e->y * r;
+                        int32 ix = int32(e->px * 16.0f), iy = int32(e->py * 16.0f);
+                        e->ix = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
+                        e->iy = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
+                        float z = m.e20 * float(c.x) + m.e21 * float(c.y) + m.e22 * float(c.z) + m.e23;
+                        int32 iz = int32(z * r * (65533.0f * 32768.0f));
+                        e->iz = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
+                        e->q = magBits(e->w) > 0x41800000 ? r : 1.0f / 16.0f;    // w > 16
+                        e->fog = ortho ? 256 : magFog(e->w);
+                        e->code |= 64;
+                    }
+                    pp[k] = e;
+                    px[k] = e->px; py[k] = e->py;
                 }
                 float abx = px[1] - px[0], aby = py[1] - py[0], acx = px[2] - px[0], acy = py[2] - py[0];
                 area = abx * acy - acx * aby;
@@ -679,7 +725,7 @@ namespace GAPI {
                 const Vertex &v = *vx[k];
                 int32 f = lit ? magLightFactor(v) : 256;
                 if (lit) MAG_COUNT(5, lightsCount);
-                if (!ortho) f = (f * magFog(cw[k])) >> 8;
+                f = (f * (behind ? magFog(cw[k]) : pp[k]->fog)) >> 8;
                 int32 r = v.light.x, g = v.light.y, b = v.light.z;
                 if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
                 rgb[k] = (uint32((r * f) >> 8) << 16) | (uint32((g * f) >> 8) << 8) | uint32((b * f) >> 8);
@@ -692,9 +738,12 @@ namespace GAPI {
             if (!behind) {
                 for (int k = 0; k < count; k++) {
                     const Vertex &v = *vx[k];
-                    float z = 0.0f;
-                    if (needZ) z = m.e20 * float(v.coord.x) + m.e21 * float(v.coord.y) + m.e22 * float(v.coord.z) + m.e23;
-                    magProject(vo[k], cx[k], cy[k], z, cw[k], iw[k], v.texCoord.x * uMul - half, v.texCoord.y * vMul - half, l[k]);
+                    const MagXform *e = pp[k];
+                    MagVtx &o = vo[k];
+                    o.x = e->ix; o.y = e->iy; o.z = e->iz; o.q = e->q;
+                    o.u = v.texCoord.x * uMul - half;
+                    o.v = v.texCoord.y * vMul - half;
+                    o.l = l[k];
                 }
                 // clockwise for the rasteriser
                 MagVtx *a = vo, *b = vo + 1, *c = vo + 2, *d = vo + 3;
