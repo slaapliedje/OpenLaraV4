@@ -781,19 +781,31 @@ namespace GAPI {
             // left out, the rest drawn solid
             if (blendMode == RS_BLEND_ALPHA && vx[0]->light.w < 128) continue;
 
-            // colour: vertex light (x face colour for palette-coloured faces) x lighting x distance fade
-            uint32 rgb[4];
+            // colour: vertex light (x face colour for palette-coloured faces) x lighting x distance fade.
+            // Room faces carry it worked out at load (MeshBuilder::roomColours): used as it is when
+            // no light and no fade applies.
             int32  l[4];
-            for (int k = 0; k < count; k++) {
-                const Vertex &v = *vx[k];
-                int32 f = lit ? magLightFactor(v) : 256;
-                if (lit) MAG_COUNT(5, lightsCount);
-                f = (f * (behind ? magFog(e[k]->w) : e[k]->fog)) >> 8;
-                int32 r = v.light.x, g = v.light.y, b = v.light.z;
-                if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
-                rgb[k] = (uint32((r * f) >> 8) << 16) | (uint32((g * f) >> 8) << 8) | uint32((b * f) >> 8);
+            uint32 tint;
+        #ifdef ROOM_COLOUR_DONE
+            if (!lit && !behind && vx[0]->color.w == ROOM_COLOUR_DONE && e[0]->fog == 256 && e[1]->fog == 256 && e[2]->fog == 256 &&
+                (count == 3 || e[3]->fog == 256)) {
+                const ubyte4 &c = vx[0]->color;
+                tint = (uint32(c.x) << 16) | (uint32(c.y) << 8) | c.z;
+                for (int k = 0; k < count; k++) l[k] = int32(uint16(vx[k]->texCoord.z)) << 15;
+            } else
+        #endif
+            {
+                uint32 rgb[4];
+                for (int k = 0; k < count; k++) {
+                    const Vertex &v = *vx[k];
+                    int32 f = lit ? magLightFactor(v) : 256;
+                    f = (f * (behind ? magFog(e[k]->w) : e[k]->fog)) >> 8;
+                    int32 r = v.light.x, g = v.light.y, b = v.light.z;
+                    if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
+                    rgb[k] = (uint32((r * f) >> 8) << 16) | (uint32((g * f) >> 8) << 8) | uint32((b * f) >> 8);
+                }
+                tint = magTint(rgb, count, l);
             }
-            uint32 tint = magTint(rgb, count, l);
             // all corners on one texel: a plain coloured face (UI bars and frames)
             if (vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
                 vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y) tint |= 0x01000000;

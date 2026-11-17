@@ -324,6 +324,55 @@ struct MeshBuilder {
         free(faces);
         free(sorted);
         numberPositions(geom.ranges, geom.count, indices + iBegin, total, vertices + vStart);
+        roomColours(indices + iBegin, total, vertices + vStart);
+    }
+
+    // Static room colour (the Maggie back end's DIP, unlit and unfogged corners): what GAPI::magTint
+    // makes of a face's vertex lights each frame, made once. For each face whose vertices belong to
+    // no other face (so not the two sides of a double-sided face, whose groups would disagree), its
+    // vertices get color = (tint R, G, B, ROOM_COLOUR_DONE) and texCoord.z = the corner's intensity
+    // (l >> 15, 16..0xFFEF). DIP may use them when the draw is unlit, no corner is fogged (fog 256)
+    // and none is behind the near plane: exactly the values its own loop would make then, since
+    // light x 256 >> 8 = light. Other faces keep color.w = 255 and take the per-frame path.
+    void roomColours(const Index *idx, int count, Vertex *vtx) {
+        int maxV = 0;
+        for (int i = 0; i < count; i++) if (idx[i] > maxV) maxV = idx[i];
+        int32 *owner = (int32*)malloc(sizeof(int32) * (maxV + 1));
+        if (!owner) return;
+        memset(owner, 0xFF, sizeof(int32) * (maxV + 1));                 // -1 = no face yet
+        for (int pass = 0; pass < 2; pass++) {
+            int i = 0, group = 0;
+            while (i + 3 <= count) {
+                const Index *g = idx + i;
+                const bool tri = vtx[g[0]].normal.w == 1 || i + 6 > count || g[3] != g[0] || g[4] != g[2];
+                const int n = tri ? 3 : 4;
+                const Index c[4] = { g[0], g[1], g[2], tri ? g[2] : g[5] };
+                if (pass == 0) {
+                    for (int k = 0; k < n; k++)
+                        owner[c[k]] = (owner[c[k]] == -1 || owner[c[k]] == group) ? group : -2;
+                } else {
+                    bool own = true;
+                    for (int k = 0; k < n; k++) own = own && owner[c[k]] == group;
+                    if (own) {
+                        uint32 rgb[4];
+                        int32 l[4];
+                        for (int k = 0; k < n; k++) {
+                            const ubyte4 &L = vtx[c[k]].light;
+                            rgb[k] = (uint32(L.x) << 16) | (uint32(L.y) << 8) | uint32(L.z);
+                        }
+                        uint32 tint = GAPI::magTint(rgb, n, l);
+                        for (int k = 0; k < n; k++) {
+                            Vertex &v = vtx[c[k]];
+                            v.color = ubyte4(uint8(tint >> 16), uint8(tint >> 8), uint8(tint), ROOM_COLOUR_DONE);
+                            v.texCoord.z = int16(uint16(l[k] >> 15));
+                        }
+                    }
+                }
+                i += tri ? 3 : 6;
+                group++;
+            }
+        }
+        free(owner);
     }
 
     // Numbers the distinct positions of a geometry's vertices 0..n-1 in coord.w (unused by rooms and
@@ -370,6 +419,7 @@ struct MeshBuilder {
     }
 #endif
 
+#ifdef OL_ROOM_CELLS
     // Model meshes: each part (one joint's mesh, drawn under that joint's matrix) numbered on its own,
     // all three blend passes, once the skins are welded (weldSkinJoints reads the joint index in
     // coord.w, which these numbers then replace: nothing else reads it on this back end). The sky
@@ -398,6 +448,7 @@ struct MeshBuilder {
             }
         }
     }
+#endif
 
     MeshBuilder(TR::Level *level, Texture *atlas) : atlas(atlas), level(level) {
     #ifdef OL_ROOM_CELLS

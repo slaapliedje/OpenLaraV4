@@ -253,6 +253,8 @@
 
 #if defined(_GAPI_MAGGIE) && !defined(OL_NO_ROOM_CELLS)
     #define OL_ROOM_CELLS           // opaque room geometry sorted by page and cell (see MeshBuilder::cellSort)
+    #define ROOM_COLOUR_DONE 141    // Vertex::color.w of a room face with its tint and intensities worked out at load
+                                    // (MeshBuilder::roomColours; not 142 = palette-coloured face, nor 255)
 #endif
 
 #ifdef FFP

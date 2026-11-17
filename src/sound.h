@@ -146,6 +146,9 @@ namespace Sound {
             }
 
             void clear() {
+            #ifdef OL_FASTMATH
+                roomSizeValid = false;
+            #endif
                 memset(output, 0, sizeof(output));
                 memset(df, 0, sizeof(df));
                 memset(af, 0, sizeof(af));
@@ -153,7 +156,21 @@ namespace Sound {
                 setRoomSize(vec3(1.0f));
             }
 
+        #ifdef OL_FASTMATH
+            // The camera sets the room size every frame (camera.h updateListener) and each call costs
+            // eight powf: recompute only when the size changes, and not at all with reverb off (the
+            // coefficients are marked stale and made on the first call after it is turned on).
+            vec3 roomSize;
+            bool roomSizeValid;
+        #endif
+
             void setRoomSize(const vec3 &size) {
+            #ifdef OL_FASTMATH
+                if (!Core::settings.audio.reverb) { roomSizeValid = false; return; }
+                if (roomSizeValid && size.x == roomSize.x && size.y == roomSize.y && size.z == roomSize.z) return;
+                roomSize = size;
+                roomSizeValid = true;
+            #endif
                 float S = (size.x * size.z + size.x * size.y + size.z * size.y) * 2;
                 float V = size.x * size.y * size.z;
                 float f = 0.1f; // absorption factor
