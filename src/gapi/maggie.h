@@ -485,10 +485,10 @@ namespace GAPI {
     };
 
     inline void magProject(MagVtx &o, float x, float y, float z, float w, float invw, int32 u, int32 v, int32 l) {
-        int32 ix = int32(x * invw * 16.0f), iy = int32(y * invw * 16.0f);
+        int32 ix = magInt(x * invw * 16.0f), iy = magInt(y * invw * 16.0f);
         o.x = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
         o.y = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
-        int32 iz = int32(z * invw * (65533.0f * 32768.0f));
+        int32 iz = magInt(z * invw * (65533.0f * 32768.0f));
         o.z = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
         o.q = magBits(w) > 0x41800000 ? invw : 1.0f / 16.0f;     // w > 16
         o.u = u;
@@ -536,6 +536,9 @@ namespace GAPI {
         int32  ix, iy, iz;               // as MagVtx
         float  q;
         int32  fog;                      // distance fade, 0..256
+        uint32 lver;                     // lighting worked out for this light set (magLightsVersion; 0 = not yet)
+        int32  lf;                       // magLightFactor for the normal below
+        int16  lnx, lny, lnz;
     } *magPos = NULL;
     int    magPosCap = 0;
     #define MAG_HASH_SIZE 1024
@@ -779,6 +782,7 @@ namespace GAPI {
                     float sx = m.e00 * fx + m.e01 * fy + m.e02 * fz + m.e03;
                     float sy = m.e10 * fx + m.e11 * fy + m.e12 * fz + m.e13;
                     x->x = sx; x->y = sy; x->w = w;
+                    x->lver = 0;
                     int32 wb = magBits(w);
                     // bits 0..3: left of, right of, above, below the scissor rectangle - the portal a room is
                     // seen through (sign bits; valid for w > 0), bit 4 too far, bit 5 behind the near plane
@@ -809,11 +813,11 @@ namespace GAPI {
                         const short4 &c = vx[k]->coord;
                         float r = 1.0f / x->w;
                         x->px = x->x * r; x->py = x->y * r;
-                        int32 ix = int32(x->px * 16.0f), iy = int32(x->py * 16.0f);
+                        int32 ix = magInt(x->px * 16.0f), iy = magInt(x->py * 16.0f);
                         x->ix = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
                         x->iy = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
                         float z = m.e20 * float(c.x) + m.e21 * float(c.y) + m.e22 * float(c.z) + m.e23;
-                        int32 iz = int32(z * r * (65533.0f * 32768.0f));
+                        int32 iz = magInt(z * r * (65533.0f * 32768.0f));
                         x->iz = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
                         x->q = magBits(x->w) > 0x41800000 ? r : 1.0f / 16.0f;    // w > 16
                         x->fog = ortho ? 256 : magFog(x->w);
@@ -869,7 +873,18 @@ namespace GAPI {
                 uint32 rgb[4];
                 for (int k = 0; k < count; k++) {
                     const Vertex &v = *vx[k];
-                    int32 f = lit ? magLightFactor(v) : 256;
+                    int32 f = 256;
+                    if (lit) {
+                        // once per position and normal: a model's corner is shared by several faces
+                        MagXform *x = e[k];
+                        if (x->lver == magLightsVersion && x->lnx == v.normal.x && x->lny == v.normal.y && x->lnz == v.normal.z)
+                            f = x->lf;
+                        else {
+                            f = x->lf = magLightFactor(v);
+                            x->lver = magLightsVersion;
+                            x->lnx = v.normal.x; x->lny = v.normal.y; x->lnz = v.normal.z;
+                        }
+                    }
                     f = (f * (behind ? magFog(e[k]->w) : e[k]->fog)) >> 8;
                     int32 r = v.light.x, g = v.light.y, b = v.light.z;
                     if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
@@ -956,8 +971,8 @@ namespace GAPI {
                         MagClipVtx &o = out[nNew++];
                         o.x = a.x + (b.x - a.x) * t; o.y = a.y + (b.y - a.y) * t;
                         o.z = a.z + (b.z - a.z) * t; o.w = a.w + (b.w - a.w) * t;
-                        o.u = a.u + int32(float(b.u - a.u) * t); o.v = a.v + int32(float(b.v - a.v) * t);
-                        o.l = a.l + int32(float(b.l - a.l) * t);
+                        o.u = a.u + magInt(float(b.u - a.u) * t); o.v = a.v + magInt(float(b.v - a.v) * t);
+                        o.l = a.l + magInt(float(b.l - a.l) * t);
                     }
                 }
                 cv = out; nIn = nNew;
