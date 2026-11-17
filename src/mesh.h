@@ -323,14 +323,15 @@ struct MeshBuilder {
 
         free(faces);
         free(sorted);
-        numberPositions(geom, indices + iBegin, total, vertices + vStart);
+        numberPositions(geom.ranges, geom.count, indices + iBegin, total, vertices + vStart);
     }
 
     // Numbers the distinct positions of a geometry's vertices 0..n-1 in coord.w (unused by rooms and
     // static meshes, which are built with w = 0), in the order the sorted faces first use them, so a
-    // cell's positions sit close together. The geometry's ranges get posBase, its first entry in the
-    // level's table. Leaves posBase at -1 (no numbers) if anything does not fit.
-    void numberPositions(Geometry &geom, const Index *idx, int count, Vertex *vtx) {
+    // cell's positions sit close together. The ranges given (all drawn under one matrix, covering idx)
+    // get posBase, their first entry in the level's table. Leaves posBase at -1 (no numbers) if
+    // anything does not fit.
+    void numberPositions(MeshRange *ranges, int nRanges, const Index *idx, int count, Vertex *vtx) {
         int size = 1024;
         while (size < count * 2) size <<= 1;
         int32 *table = (int32*)malloc(sizeof(int32) * size);          // vertex index of each number's first vertex, or -1
@@ -364,10 +365,39 @@ struct MeshBuilder {
         }
         free(table);
         if (!ok) return;
-        for (int k = 0; k < geom.count; k++) geom.ranges[k].posBase = gMeshPosCount;
+        for (int k = 0; k < nRanges; k++) ranges[k].posBase = gMeshPosCount;
         gMeshPosCount += n;
     }
 #endif
+
+    // Model meshes: each part (one joint's mesh, drawn under that joint's matrix) numbered on its own,
+    // all three blend passes, once the skins are welded (weldSkinJoints reads the joint index in
+    // coord.w, which these numbers then replace: nothing else reads it on this back end). The sky
+    // is left to the hash: its first range is stretched over all its parts after building.
+    void numberModelPositions(Index *indices, Vertex *vertices) {
+        for (int i = 0; i < level->modelsCount; i++) {
+            if (level->models[i].type == TR::Entity::SKY) continue;
+            ModelRange &mr = models[i];
+            for (int transp = 0; transp < 3; transp++) {
+                Geometry &geom = mr.geometry[transp];
+                int r = 0;
+                for (int j = 0; j < level->models[i].mCount && j < 32; j++) {
+                    int n = mr.parts[transp][j];
+                    if (n <= 0 || r + n > geom.count) { r += n > 0 ? n : 0; continue; }
+                    MeshRange *first = geom.ranges + r;
+                    bool contiguous = true;
+                    int end = first[0].iStart;
+                    for (int k = 0; k < n; k++) {
+                        if (first[k].iStart != end || first[k].vStart != first[0].vStart) contiguous = false;
+                        end = first[k].iStart + first[k].iCount;
+                    }
+                    if (contiguous && end > first[0].iStart)
+                        numberPositions(first, n, indices + first[0].iStart, end - first[0].iStart, vertices + first[0].vStart);
+                    r += n;
+                }
+            }
+        }
+    }
 
     MeshBuilder(TR::Level *level, Texture *atlas) : atlas(atlas), level(level) {
     #ifdef OL_ROOM_CELLS
@@ -639,6 +669,9 @@ struct MeshBuilder {
 
         weldSkinJoints(vertices + vStartModel, level->extra.laraSkin, level->extra.laraJoints);
         weldSkinJoints(vertices + vStartModel, level->extra.braid,    level->extra.braid);
+    #ifdef OL_ROOM_CELLS
+        numberModelPositions(indices, vertices);
+    #endif
 
         //ASSERT(vCount - vStartModel <= 0xFFFF);
 

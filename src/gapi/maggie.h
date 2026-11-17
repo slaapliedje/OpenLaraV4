@@ -501,7 +501,7 @@ namespace GAPI {
     int    magPosCap = 0;
     #define MAG_HASH_SIZE 1024
     MagXform magHash[MAG_HASH_SIZE];
-    uint16 magXformStamp = 0;
+    uint32 magXformStamp = 0;            // one per matrix/scissor change; never wraps in practice (table entries)
     short4 magXformClip;
     mat4   magModel, magM;               // mModel the cache belongs to, and screenProj * mModel
     vec3   magCam;                       // camera position in object space
@@ -594,10 +594,10 @@ namespace GAPI {
                     for (int k = 0; k < 3; k++) magPlane[j][4 + k] = fabsf(magPlane[j][k]);
             }
             // a new stamp empties the position cache
-            if (++magXformStamp == 0) {
-                if (magPos) memset(magPos, 0, magPosCap * sizeof(MagXform));
+            // a new stamp empties both position caches; the hash keeps only its low 16 bits
+            if ((++magXformStamp & 0xFFFF) == 0) {
                 memset(magHash, 0, sizeof(magHash));
-                magXformStamp = 1;
+                magXformStamp++;
             }
         }
         const mat4 &m = magM;
@@ -702,7 +702,7 @@ namespace GAPI {
                     x->stamp = stamp;
                 } else {
                     // models and dynamic geometry: a small hash of positions under this matrix
-                    const uint32 key1 = (uint32(uint16(c.x)) << 16) | uint16(c.y), key2 = (uint32(uint16(c.z)) << 16) | stamp;
+                    const uint32 key1 = (uint32(uint16(c.x)) << 16) | uint16(c.y), key2 = (uint32(uint16(c.z)) << 16) | uint16(stamp);
                     uint32 h = uint32(c.x * 73 + c.y * 151 + c.z * 283);
                     x = magHash + ((h ^ (h >> 9)) & (MAG_HASH_SIZE - 1));
                     if (x->key1 == key1 && x->stamp == key2) goto known;
