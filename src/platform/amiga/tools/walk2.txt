@@ -1,0 +1,17 @@
+240 shot
+245 up 1
+300 shot
+360 shot
+420 shot
+480 shot
+540 shot
+600 shot
+660 shot
+700 up 0
+705 left 1
+725 left 0
+730 shot
+735 up 1
+800 shot
+860 shot
+900 up 0

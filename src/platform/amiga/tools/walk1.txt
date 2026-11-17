@@ -1,0 +1,27 @@
+240 shot
+240 left 1
+260 left 0
+265 up 1
+300 shot
+330 up 0
+335 shot
+340 left 1
+352 left 0
+355 up 1
+400 shot
+420 up 0
+425 right 1
+447 right 0
+450 shot
+452 up 1
+500 shot
+520 up 0
+525 right 1
+545 right 0
+550 shot
+552 up 1
+600 shot
+620 up 0
+625 left 1
+660 left 0
+665 shot

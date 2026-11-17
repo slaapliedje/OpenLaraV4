@@ -1,0 +1,7 @@
+240 shot
+245 up 1
+340 up 0
+345 shot
+350 left 1
+372 left 0
+380 shot
