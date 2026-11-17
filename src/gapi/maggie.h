@@ -540,12 +540,12 @@ namespace GAPI {
         // around the texel centres, and keeps a cell's last texel from mixing with its neighbour's
         const int32 half = filter ? (1 << (23 - tex->sizeLog2)) : 0;
 
-        if (magVtxCap < iCount * 2 + 16) {
-            magVtxCap = iCount * 2 + 256;
+        if (magVtxCap < iCount * 3 + 16) {
+            magVtxCap = iCount * 3 + 256;
             magVtxBuf = (MagVtx*)realloc(magVtxBuf, magVtxCap * sizeof(MagVtx));
         }
-        if (magPrimCap < iCount + 16) {
-            magPrimCap = iCount + 256;
+        if (magPrimCap < iCount * 2 + 16) {
+            magPrimCap = iCount * 2 + 256;
             magPrimBuf = (MagPrim*)realloc(magPrimBuf, magPrimCap * sizeof(MagPrim));
         }
         if (!magVtxBuf || !magPrimBuf) { magVtxCap = magPrimCap = 0; return; }
@@ -737,6 +737,7 @@ namespace GAPI {
             // screen positions and facing (polygons crossing the near plane: after clipping)
             float area = 0.0f, area2 = 0.0f;
             bool flat = false, reverse = false;
+            bool clip = behind != 0;         // through the clipper: near plane or guard band
             if (!behind) {
                 // divide, convert and fade once per position
                 for (int k = 0; k < count; k++) {
@@ -754,7 +755,12 @@ namespace GAPI {
                         x->q = magBits(x->w) > 0x41800000 ? r : 1.0f / 16.0f;    // w > 16
                         x->fog = ortho ? 256 : magFog(x->w);
                         x->code |= 64;
+                        // far off screen (a corner close to the camera): the clamp above would bend the
+                        // polygon, so it goes through the clipper instead
+                        if (uint32(ix + MAG_GUARD * 16) > uint32(MAG_GUARD * 32) || uint32(iy + MAG_GUARD * 16) > uint32(MAG_GUARD * 32))
+                            x->code |= 128;
                     }
+                    clip |= (x->code & 128) != 0;
                 }
                 float abx = e[1]->px - e[0]->px, aby = e[1]->py - e[0]->py, acx = e[2]->px - e[0]->px, acy = e[2]->py - e[0]->py;
                 area = abx * acy - acx * aby;
@@ -787,7 +793,7 @@ namespace GAPI {
             int32  l[4];
             uint32 tint;
         #ifdef ROOM_COLOUR_DONE
-            if (!lit && !behind && vx[0]->color.w == ROOM_COLOUR_DONE && e[0]->fog == 256 && e[1]->fog == 256 && e[2]->fog == 256 &&
+            if (!lit && !clip && vx[0]->color.w == ROOM_COLOUR_DONE && e[0]->fog == 256 && e[1]->fog == 256 && e[2]->fog == 256 &&
                 (count == 3 || e[3]->fog == 256)) {
                 const ubyte4 &c = vx[0]->color;
                 tint = (uint32(c.x) << 16) | (uint32(c.y) << 8) | c.z;
@@ -810,7 +816,7 @@ namespace GAPI {
             if (vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
                 vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y) tint |= 0x01000000;
 
-            if (!behind) {
+            if (!clip) {
                 for (int k = 0; k < count; k++) {
                     const Vertex &v = *vx[k];
                     const MagXform *x = e[k];
@@ -840,9 +846,10 @@ namespace GAPI {
                 continue;
             }
 
-            // crossing the near plane: Sutherland-Hodgman against w >= nearW (at most count + 1
-            // vertices), drawn as a triangle fan
-            MagClipVtx cv[4];
+            // crossing the near plane or reaching far off screen: Sutherland-Hodgman against w >= nearW
+            // and the guard band (-MAG_GUARD..MAG_GUARD pixels each way), drawn as a triangle fan
+            MagClipVtx cb[2][10];
+            MagClipVtx *cv = cb[0];
             for (int k = 0; k < count; k++) {
                 const Vertex &v = *vx[k];
                 cv[k].x = e[k]->x; cv[k].y = e[k]->y; cv[k].w = e[k]->w;
@@ -851,19 +858,46 @@ namespace GAPI {
                 cv[k].v = v.texCoord.y * vMul - half;
                 cv[k].l = l[k];
             }
-            MagVtx *first = vo;
-            for (int k = 0; k < count; k++) {
-                const MagClipVtx &a = cv[k];
-                const MagClipVtx &b = cv[k + 1 == count ? 0 : k + 1];
-                bool aIn = a.w >= nearW, bIn = b.w >= nearW;
-                if (aIn) { magProject(*vo, a.x, a.y, a.z, a.w, 1.0f / a.w, a.u, a.v, a.l); vo++; }
-                if (aIn != bIn) {
-                    float t = (nearW - a.w) / (b.w - a.w);
-                    magProject(*vo, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, nearW, 1.0f / nearW,
-                               a.u + int32(float(b.u - a.u) * t), a.v + int32(float(b.v - a.v) * t),
-                               a.l + int32(float(b.l - a.l) * t));
-                    vo++;
+            int nIn = count;
+            for (int pl = 0; pl < 5 && nIn >= 3; pl++) {
+                // distance to the plane: a * x + b * y + c * w + d
+                static const float PL[5][4] = {
+                    { 0.0f, 0.0f, 1.0f, 0.0f }, { 1.0f, 0.0f, float(MAG_GUARD), 0.0f }, { -1.0f, 0.0f, float(MAG_GUARD), 0.0f },
+                    { 0.0f, 1.0f, float(MAG_GUARD), 0.0f }, { 0.0f, -1.0f, float(MAG_GUARD), 0.0f } };
+                const float *P = PL[pl];
+                const float pd = pl ? 0.0f : -nearW;
+                float dist[10];
+                bool anyOut = false;
+                for (int k = 0; k < nIn; k++) {
+                    dist[k] = P[0] * cv[k].x + P[1] * cv[k].y + P[2] * cv[k].w + pd;
+                    anyOut |= dist[k] < 0.0f;
                 }
+                if (!anyOut) continue;
+                MagClipVtx *out = cv == cb[0] ? cb[1] : cb[0];
+                int nNew = 0;
+                for (int k = 0; k < nIn; k++) {
+                    int k2 = k + 1 == nIn ? 0 : k + 1;
+                    const MagClipVtx &a = cv[k], &b = cv[k2];
+                    bool aIn = dist[k] >= 0.0f, bIn = dist[k2] >= 0.0f;
+                    if (aIn) out[nNew++] = a;
+                    if (aIn != bIn) {
+                        float t = dist[k] / (dist[k] - dist[k2]);
+                        MagClipVtx &o = out[nNew++];
+                        o.x = a.x + (b.x - a.x) * t; o.y = a.y + (b.y - a.y) * t;
+                        o.z = a.z + (b.z - a.z) * t; o.w = a.w + (b.w - a.w) * t;
+                        o.u = a.u + int32(float(b.u - a.u) * t); o.v = a.v + int32(float(b.v - a.v) * t);
+                        o.l = a.l + int32(float(b.l - a.l) * t);
+                    }
+                }
+                cv = out; nIn = nNew;
+            }
+            if (nIn < 3) continue;
+            MagVtx *first = vo;
+            for (int k = 0; k < nIn; k++) {
+                const MagClipVtx &a = cv[k];
+                float w = a.w < nearW ? nearW : a.w;
+                magProject(*vo, a.x, a.y, a.z, w, 1.0f / w, a.u, a.v, a.l);
+                vo++;
             }
             int nOut = int(vo - first);
             for (int k = 1; k + 1 < nOut; k++) {             // fan, same winding
@@ -881,7 +915,48 @@ namespace GAPI {
         }   // segments
 
         if (MAG_STAGE(1)) return;
+    #ifdef OL_EMU
+        {   // local variable OLPICK=x,y: the polygons covering that pixel
+            const int pickX = Mag::pickX, pickY = Mag::pickY;
+            if (pickX >= 0)
+                for (const MagPrim *pr = magPrimBuf; pr < po; pr++) {
+                    int32 X = pickX * 16 + 8, Y = pickY * 16 + 8;
+                    bool in = true;
+                    for (int k = 0; k < pr->n && in; k++) {
+                        const MagVtx *p0 = pr->v[k], *p1 = pr->v[(k + 1) % pr->n];
+                        in = float(p1->x - p0->x) * float(Y - p0->y) - float(p1->y - p0->y) * float(X - p0->x) >= 0.0f;
+                    }
+                    if (!in) continue;
+                    magTracePrim = pr;
+                    printf("PICK tex %p log2 %d cutout %d blend %d depth %d/%d cull %d n %d tint %08lx area %d\n", tex, tex ? tex->sizeLog2 : 0,
+                           int(cutout) + 10 * int(flatDraw), int(blendMode), int(depthTest), int(depthWrite), int(cullNone), pr->n, (unsigned long)pr->tint, int(pr->area));
+                    if (tex && tex->memory) {
+                        printf("  tex %dx%d orig %dx%d uMul %ld vMul %ld; column under corner 0, rows -2..+70:\n", tex->width, tex->height, tex->origWidth, tex->origHeight, (long)tex->uMul, (long)tex->vMul);
+                        int tx = int(pr->v[0]->u >> 16) + 20, ty = int(pr->v[0]->v >> 16);
+                        for (int y = ty - 2; y < ty + 70; y++)
+                            if (y >= 0 && y < tex->height && tx < tex->width) {
+                                const uint8 *t = tex->memory + (y * tex->width + tx) * 4;
+                                printf("   y%d %02x%02x%02x%02x", y, t[0], t[1], t[2], t[3]);
+                                if ((y & 7) == 7) printf("\n");
+                            }
+                        printf("\n");
+                    }
+                    for (int k = 0; k < pr->n; k++)
+                        printf("  %d,%d z %ld u %08lx v %08lx l %ld\n", int(pr->v[k]->x >> 4), int(pr->v[k]->y >> 4), (long)pr->v[k]->z,
+                               (unsigned long)pr->v[k]->u, (unsigned long)pr->v[k]->v, (long)pr->v[k]->l);
+                }
+        }
+    #endif
+    #ifdef OL_EMU
+        const uint16 pickBefore = Mag::pickX >= 0 ? swColor[Mag::pickY * Core::width + Mag::pickX] : 0;
+    #endif
         for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDraw(*pr);
+    #ifdef OL_EMU
+        if (Mag::pickX >= 0 && swColor[Mag::pickY * Core::width + Mag::pickX] != pickBefore)
+            printf("PIX %04x -> %04x: iStart %d iCount %d prims %d tex %p flat %d blend %d depth %d/%d mode size %x\n", pickBefore,
+                   swColor[Mag::pickY * Core::width + Mag::pickX], iStart, iCount, int(po - magPrimBuf), tex, int(flatDraw), int(blendMode),
+                   int(depthTest), int(depthWrite), int(magDipSize));
+    #endif
     }
 
     // Full-screen backgrounds (title picture, logos): scaled to the screen once (RGB565, letterboxed)

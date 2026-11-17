@@ -10,7 +10,7 @@ L=${1:-DATA/GYM.PHD}; N=${2:-20}; NAME=${3:-gym}
 BIN=${BIN:-OpenLara}
 cp "$H/$BIN" "$R/C/OpenLara"
 rm -f "$R/out/$NAME.txt" "$R/out/$NAME.raw" "$R/out/$NAME.log"
-echo "C:OpenLara $L $N out/$NAME ${SCRIPT:-} >out/$NAME.log" > "$R/S/Job"
+{ [ -n "${PRE:-}" ] && echo "$PRE"; echo "C:OpenLara $L $N out/$NAME ${SCRIPT:-} >out/$NAME.log"; } > "$R/S/Job"
 cd "$R"
 DISP=:${EMU_DISPLAY:-94}
 XDG=$R/out/xdg; mkdir -p "$XDG"; chmod 700 "$XDG"

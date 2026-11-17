@@ -47,6 +47,7 @@
 
     #define MAG_MIN_AREA  0.002f         // pixels^2 (cross product): smaller polygons cover no pixel centre worth drawing
     #define MAG_XY_MAX    (8192 << 4)    // vertex clamp: an edge's 16.16 step per line then fits 32 bits
+    #define MAG_GUARD     6000           // pixels: polygons reaching further off screen are clipped (hardware back end)
 
 #ifdef _GAPI_SW
     // per polygon: flat colours pick their palette colour; the mode follows the depth test
@@ -84,6 +85,9 @@
         return true;
     }
 
+#ifdef OL_EMU
+    const void *magTracePrim = NULL;
+#endif
     void magDraw(const MagPrim &pr) {
         MagVtx *const *p = pr.v;
         const int n = pr.n;
@@ -139,8 +143,13 @@
                     if (q < qa) qa = q;
                     if (q > qb) qb = q;
                 }
-                MagFI lo; lo.i = qa;
-                affine = magBits(lo.f * MAG_PERSP_RATIO) >= qb;
+                // Affine texturing puts a texel up to about size * (ratio - 1) / 4 pixels from its place
+                // inside a triangle, and four times that at the fourth corner of a quad (its plane comes
+                // from three): affine only when that stays under MAG_PERSP_ERR pixels.
+                MagFI lo, hi; lo.i = qa; hi.i = qb;
+                int32 ext = xmax - xmin, ey = p[bot]->y - p[top]->y;
+                if (ey > ext) ext = ey;
+                affine = magBits(lo.f * (n == 3 ? 64.0f * MAG_PERSP_ERR : 16.0f * MAG_PERSP_ERR) - (hi.f - lo.f) * float(ext)) >= 0;
             }
             if (affine) {
                 float fb = float(b->u - a->u), fc = float(c->u - a->u);
@@ -198,6 +207,11 @@
                 int32 xs = xa < clipX1 ? clipX1 : xa;
                 int32 xe = xb > clipX2 ? clipX2 : xb;
                 int32 len = xe - xs;
+            #ifdef OL_EMU
+                if (&pr == magTracePrim && y >= Mag::pickY - 6 && y <= Mag::pickY + 6)
+                    printf("   row %ld: xa %ld xb %ld xs %ld len %ld clip %d..%d y %d..%d Li %d Ri %d\n", (long)y, (long)xa, (long)xb, (long)xs, (long)len,
+                           int(clipX1), int(clipX2), int(swClipRect.y), int(swClipRect.w), L.i, R.i);
+            #endif
                 if (len > 0) {
                     int32 l;
                     if (lightPlane) {
@@ -260,18 +274,24 @@
                     Mag::span(swColor + offset, len, int32(uRow + uint32(xs) * uint32(du)), int32(vRow + uint32(xs) * uint32(dv)),
                               du, dv, l, dl, offset, z, dz2);
                 } else {
-                    // Pieces of at most MAG_PERSP_STEP pixels, affine inside; one piece when 1/w hardly
+                    // Affine pieces, as many as the error bound asks for; one piece when 1/w hardly
                     // changes along the span. Only pixel centres inside the polygon are evaluated
                     // (1/w > 0 there): the last piece ends on the last pixel.
                     float fxs = float(xs);
                     float q0 = float(qRow) + fxs * qdx, u0 = float(uqRow) + fxs * udx, v0 = float(vqRow) + fxs * vdx;
                     float qe = q0 + qdx * float(len - 1);
+                    // one affine piece is off by about len * (ratio - 1) / 4 pixels, n pieces by 1 / n^2 of that
                     int32 step = 4096;
                     {
-                        int32 qa = magBits(q0), qb = magBits(qe);
-                        if (qa > qb) { int32 t = qa; qa = qb; qb = t; }
-                        MagFI lo; lo.i = qa;
-                        if (magBits(lo.f * MAG_PERSP_RATIO) < qb) step = MAG_PERSP_STEP;
+                        float qlo = q0 < qe ? q0 : qe;
+                        float e = (q0 < qe ? qe - q0 : q0 - qe) * float(len), t = qlo * (4.0f * MAG_PERSP_ERR);
+                        if (magBits(t - e) < 0) {
+                            if (magBits(t * 4.0f - e) >= 0) step = (len + 1) >> 1;
+                            else if (magBits(t * 16.0f - e) >= 0) step = (len + 3) >> 2;
+                            else if (magBits(t * 64.0f - e) >= 0) step = (len + 7) >> 3;
+                            else step = (len + 15) >> 4;
+                            if (step < 8) step = 8;
+                        }
                     }
                     float r = 1.0f / q0;
                     float ua = u0 * r, va = v0 * r;
