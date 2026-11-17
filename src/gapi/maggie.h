@@ -24,7 +24,7 @@
 #define COLOR_FMT_565
 #define CONV_COLOR(r,g,b) (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
 
-#define SW_MAX_DIST  (20.0f * 1024.0f)
+#define SW_MAX_DIST  (45.0f * 1024.0f)    // far plane: the engine camera's zfar (camera.h), so nothing it sees is cut
 #define SW_FOG_START (12.0f * 1024.0f)
 #define SW_NEAR      32.0f               // near plane (w); polygons crossing it are clipped
 
@@ -394,8 +394,12 @@ namespace GAPI {
     // fog colours are black or dark (0.25 at most), so fading to black is close. A table, since the
     // 68080 has no exponent instruction (FETOX would trap into the 060 package).
     #define MAG_FOG_SHIFT 7              // table step: 128 units
-    #define MAG_FOG_SIZE  256            // up to 32K units
-    int32  magFogTab[MAG_FOG_SIZE + 1];
+    #define MAG_FOG_SIZE  360            // up to 45K units (SW_MAX_DIST)
+    #define MAG_FOG_TABS  4              // kept tables: a frame switches between level, water and no fog
+    int32  magFogTabs[MAG_FOG_TABS][MAG_FOG_SIZE + 1];
+    float  magFogTabD[MAG_FOG_TABS] = { -1.0f, -1.0f, -1.0f, -1.0f }, magFogTabC[MAG_FOG_TABS];
+    int    magFogTabNext = 0;
+    int32 *magFogTab = magFogTabs[0];
     float  magFogDensity = -1.0f;        // the table's density; < 0 = none built yet
     bool   magFogOn = false, magFogDirty = true;
 
@@ -412,8 +416,15 @@ namespace GAPI {
         magFogDensity = d; magFogFloor = c;
         magFogOn = d > 0.0f;
         magFogDirty = true;              // positions cached under the old density carry its fade
+        if (!magFogOn) return;           // (magFog answers 256 without the table)
+        for (int t = 0; t < MAG_FOG_TABS; t++)
+            if (magFogTabD[t] == d && magFogTabC[t] == c) { magFogTab = magFogTabs[t]; return; }
+        int t = magFogTabNext;
+        magFogTabNext = (t + 1) % MAG_FOG_TABS;
+        magFogTabD[t] = d; magFogTabC[t] = c;
+        magFogTab = magFogTabs[t];
         for (int i = 0; i <= MAG_FOG_SIZE; i++) {
-            float f = magFogOn ? expf(-float(i << MAG_FOG_SHIFT) * d) : 1.0f;
+            float f = expf(-float(i << MAG_FOG_SHIFT) * d);
             magFogTab[i] = int32(256.0f * (f + (1.0f - f) * c) + 0.5f);
         }
     }
