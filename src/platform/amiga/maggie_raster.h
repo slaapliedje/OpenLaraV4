@@ -293,6 +293,7 @@
                         if (lightPlane) Mag::lightStep(dlx / 32768);     // towards zero: a span's light stays between its ends
                     }
                     int32 offset = lineOffset + xs;
+                    MAG_COUNT(5, (dv < 0 ? -dv : dv) > (du < 0 ? -du : du) ? len : 0);     // pixels of spans that run along v
                     Mag::spanSteps(swColor + offset, len, int32(uRow + uint32(xs) * uint32(du)), int32(vRow + uint32(xs) * uint32(dv)),
                                    l, offset, (zRow + uint32(xs) * uint32(dz)) << 1, zs);
                 }
