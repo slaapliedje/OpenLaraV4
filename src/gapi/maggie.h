@@ -574,6 +574,11 @@ namespace GAPI {
         return magStipple[0] && magStipple[1];
     }
 
+    // what the corner transform's assembly reads: rows w, x, y of magM, and the scissor rectangle
+    float magXA[12], magClipA[4];
+    // and the projection's: row z of magM, then 1, 16 and the depth scale
+    float magZA[7];
+
     void DIP(Mesh *mesh, const MeshRange &range) {
         if (MAG_STAGE(4)) return;
         const Index  *indices  = mesh->iBuffer;
@@ -683,6 +688,12 @@ namespace GAPI {
         if (lit && magLightsFor != magLightsVersion) { transformLights(); magLightsFor = magLightsVersion; }
 
         const float clipL = float(swClipRect.x), clipT = float(swClipRect.y), clipR = float(swClipRect.z), clipB = float(swClipRect.w);
+        magXA[0] = magM.e30; magXA[1] = magM.e31; magXA[2] = magM.e32; magXA[3] = magM.e33;
+        magXA[4] = magM.e00; magXA[5] = magM.e01; magXA[6] = magM.e02; magXA[7] = magM.e03;
+        magXA[8] = magM.e10; magXA[9] = magM.e11; magXA[10] = magM.e12; magXA[11] = magM.e13;
+        magClipA[0] = clipL; magClipA[1] = clipR; magClipA[2] = clipT; magClipA[3] = clipB;
+        magZA[0] = magM.e20; magZA[1] = magM.e21; magZA[2] = magM.e22; magZA[3] = magM.e23;
+        magZA[4] = 1.0f; magZA[5] = 16.0f; magZA[6] = 65533.0f * 32768.0f;
         // orthographic projections (UI, 2D) have w = 1 everywhere: only perspective ones get the near plane
         const bool ortho = Core::mProj.e33 == 1.0f;
         const float nearW = ortho ? 0.0f : SW_NEAR;
@@ -777,18 +788,57 @@ namespace GAPI {
                     else { x->key1 = key1; x->stamp = key2; }
                 }
                 {
+                #if defined(OL_EMU) || defined(MAG_XFORM_C)
                     float fx = float(c.x), fy = float(c.y), fz = float(c.z);
                     float w = m.e30 * fx + m.e31 * fy + m.e32 * fz + m.e33;
                     float sx = m.e00 * fx + m.e01 * fy + m.e02 * fz + m.e03;
                     float sy = m.e10 * fx + m.e11 * fy + m.e12 * fz + m.e13;
                     x->x = sx; x->y = sy; x->w = w;
-                    x->lver = 0;
                     int32 wb = magBits(w);
                     // bits 0..3: left of, right of, above, below the scissor rectangle - the portal a room is
                     // seen through (sign bits; valid for w > 0), bit 4 too far, bit 5 behind the near plane
                     x->code = (uint32(magBits(sx - clipL * w)) >> 31) | ((uint32(magBits(clipR * w - sx)) >> 31) << 1) |
                               ((uint32(magBits(sy - clipT * w)) >> 31) << 2) | ((uint32(magBits(clipB * w - sy)) >> 31) << 3) |
                               (wb > farBits ? 16 : 0) | (wb < nearBits ? 32 : 0);
+                #else
+                    // The same in assembly, ordered for the 68080's FPU: it runs independent multiplies and
+                    // adds one a cycle but stalls on a dependent one (5-6 cycles), and gcc orders them
+                    // dependently: 184 cycles a corner as C, 78 like this (measured, see the
+                    // vampire-v4-dev skill, cpu.md). Loads and the nine products first, sums as
+                    // (a + b) + (c + d), then the four clip products and differences; the codes are the
+                    // sign bits, shifted in with addx. fsub with three registers is a 68080 form (.short).
+                    register const short4 *rc __asm__("a0") = &c;
+                    register float *ro __asm__("a1") = &x->x;
+                    register const float *rm __asm__("a2") = magXA;
+                    register const float *rk __asm__("a3") = magClipA;
+                    register int32 rn __asm__("d4") = nearBits;
+                    register int32 rf __asm__("d5") = farBits;
+                    __asm__ __volatile__(
+                        "fmove.w (a0),fp0\n fmove.w 2(a0),fp1\n fmove.w 4(a0),fp2\n"
+                        "fmove.s (a2),fp3\n fmove.s 16(a2),fp4\n fmove.s 4(a2),fp5\n fmove.s 20(a2),fp6\n fmove.s 8(a2),fp7\n"
+                        "fmul.x fp0,fp3\n fmul.x fp0,fp4\n fmul.s 32(a2),fp0\n fmul.x fp1,fp5\n fmul.x fp1,fp6\n fmul.s 36(a2),fp1\n fmul.x fp2,fp7\n"
+                        "fadd.x fp5,fp3\n fmove.s 24(a2),fp5\n fmul.x fp2,fp5\n fadd.x fp6,fp4\n fmul.s 40(a2),fp2\n fadd.x fp1,fp0\n"
+                        "fadd.s 12(a2),fp7\n fadd.s 28(a2),fp5\n fadd.s 44(a2),fp2\n"
+                        "fmove.s (a3),fp1\n fmove.s 12(a3),fp6\n"
+                        "fadd.x fp7,fp3\n fadd.x fp5,fp4\n fadd.x fp2,fp0\n"
+                        "fmove.s 4(a3),fp2\n fmove.s 8(a3),fp5\n moveq #0,d1\n"
+                        "fmul.x fp3,fp1\n fmul.x fp3,fp2\n fmul.x fp3,fp5\n fmul.x fp3,fp6\n"
+                        "fmove.s fp3,8(a1)\n fmove.s fp3,d2\n fmove.s fp4,(a1)\n fmove.s fp0,4(a1)\n"
+                        "cmp.l d4,d2\n slt d0\n add.b d0,d0\n addx.l d1,d1\n"
+                        "cmp.l d5,d2\n sgt d0\n add.b d0,d0\n addx.l d1,d1\n"
+                        ".short 0xfc01,0x4789\n"          // fsub fp1,fp4,fp7: x - L w
+                        "fsub.x fp4,fp2\n"                // R w - x
+                        ".short 0xfc05,0x0189\n"          // fsub fp5,fp0,fp1: y - T w
+                        "fsub.x fp0,fp6\n"                // B w - y
+                        "fmove.s fp6,d0\n add.l d0,d0\n addx.l d1,d1\n"
+                        "fmove.s fp1,d0\n add.l d0,d0\n addx.l d1,d1\n"
+                        "fmove.s fp2,d0\n add.l d0,d0\n addx.l d1,d1\n"
+                        "fmove.s fp7,d0\n add.l d0,d0\n addx.l d1,d1\n"
+                        "move.l d1,12(a1)\n"
+                        : : "a"(rc), "a"(ro), "a"(rm), "a"(rk), "d"(rn), "d"(rf)
+                        : "d0", "d1", "d2", "fp0", "fp1", "fp2", "fp3", "fp4", "fp5", "fp6", "fp7", "cc", "memory");
+                #endif
+                    x->lver = 0;
                 }
             known:
                 e[k] = x;
@@ -811,13 +861,40 @@ namespace GAPI {
                     MagXform *x = e[k];
                     if (!(x->code & 64)) {
                         const short4 &c = vx[k]->coord;
+                    #if defined(OL_EMU) || defined(MAG_XFORM_C)
                         float r = 1.0f / x->w;
                         x->px = x->x * r; x->py = x->y * r;
                         int32 ix = magInt(x->px * 16.0f), iy = magInt(x->py * 16.0f);
-                        x->ix = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
-                        x->iy = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
                         float z = m.e20 * float(c.x) + m.e21 * float(c.y) + m.e22 * float(c.z) + m.e23;
                         int32 iz = magInt(z * r * (65533.0f * 32768.0f));
+                    #else
+                        // in assembly for the same reason as the transform: the divide (9 cycles) starts
+                        // first and the depth row is worked out while it runs
+                        float r;
+                        int32 ix, iy, iz;
+                        {
+                            register int32 rix __asm__("d0"), riy __asm__("d1"), riz __asm__("d2");
+                            register const short4 *rc __asm__("a0") = &c;
+                            register float *ro __asm__("a1") = &x->x;
+                            register const float *rz __asm__("a2") = magZA;
+                            __asm__ __volatile__(
+                                "fmove.s 8(a1),fp0\n fmove.s 16(a2),fp1\n fdiv.x fp0,fp1\n"            // 1 / w
+                                "fmove.w (a0),fp2\n fmove.w 2(a0),fp3\n fmove.w 4(a0),fp4\n"
+                                "fmul.s (a2),fp2\n fmul.s 4(a2),fp3\n fmul.s 8(a2),fp4\n"
+                                "fmove.s (a1),fp0\n"
+                                "fadd.x fp3,fp2\n fadd.s 12(a2),fp4\n fmove.s 4(a1),fp3\n fadd.x fp4,fp2\n"   // z
+                                "fmul.x fp1,fp0\n fmul.x fp1,fp3\n fmul.x fp1,fp2\n"                     // px, py, z / w
+                                "fmove.s fp1,36(a1)\n fmove.s fp0,16(a1)\n fmove.s fp3,20(a1)\n"
+                                "fmul.s 20(a2),fp0\n fmul.s 20(a2),fp3\n fmul.s 24(a2),fp2\n"
+                                "fmove.l fp0,d0\n fmove.l fp3,d1\n fmove.l fp2,d2\n"
+                                : "=d"(rix), "=d"(riy), "=d"(riz) : "a"(rc), "a"(ro), "a"(rz)
+                                : "fp0", "fp1", "fp2", "fp3", "fp4", "cc", "memory");
+                            ix = rix; iy = riy; iz = riz;
+                        }
+                        r = x->q;
+                    #endif
+                        x->ix = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
+                        x->iy = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
                         x->iz = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
                         x->q = magBits(x->w) > 0x41800000 ? r : 1.0f / 16.0f;    // w > 16
                         x->fog = ortho ? 256 : magFog(x->w);
