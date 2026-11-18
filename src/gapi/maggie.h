@@ -535,11 +535,12 @@ namespace GAPI {
         float  px, py;                   // pixels
         int32  ix, iy, iz;               // as MagVtx
         float  q;
-        int32  fog;                      // distance fade, 0..256
         uint32 lver;                     // lighting worked out for this light set (magLightsVersion; 0 = not yet)
         int32  lf;                       // magLightFactor for the normal below
         int16  lnx, lny, lnz;
-    } *magPos = NULL;
+        int16  fog;                      // distance fade, 0..256
+    } *magPos = NULL;                    // 64 bytes: indexing is a shift
+    static_assert(sizeof(MagXform) == 64, "MagXform size");
     int    magPosCap = 0;
     #define MAG_HASH_SIZE 1024
     MagXform magHash[MAG_HASH_SIZE];
@@ -964,7 +965,10 @@ namespace GAPI {
                     }
                     f = (f * (behind ? magFog(e[k]->w) : e[k]->fog)) >> 8;
                     int32 r = v.light.x, g = v.light.y, b = v.light.z;
-                    if (flatDraw) { r = r * v.color.x / 255; g = g * v.color.y / 255; b = b * v.color.z / 255; }
+                    if (flatDraw) {              // x / 255 for x <= 65534, without a 20-cycle divide
+                        r *= v.color.x; g *= v.color.y; b *= v.color.z;
+                        r = (r + 1 + (r >> 8)) >> 8; g = (g + 1 + (g >> 8)) >> 8; b = (b + 1 + (b >> 8)) >> 8;
+                    }
                     r = (r * f) >> 8; g = (g * f) >> 8; b = (b * f) >> 8;            // f may be up to 512
                     if ((r | g | b) > 255) { r = r > 255 ? 255 : r; g = g > 255 ? 255 : g; b = b > 255 ? 255 : b; }
                     rgb[k] = (uint32(r) << 16) | (uint32(g) << 8) | uint32(b);
