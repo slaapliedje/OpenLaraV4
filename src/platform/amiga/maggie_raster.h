@@ -181,7 +181,8 @@
         int32 du = 0, dv = 0, duY = 0, dvY = 0;
         uint32 uRow = 0, vRow = 0;
         float qdx = 0.0f, qdy = 0.0f, udx = 0.0f, udy = 0.0f, vdx = 0.0f, vdy = 0.0f;
-        double qRow = 0.0, uqRow = 0.0, vqRow = 0.0;     // perspective: u/w, v/w, 1/w at pixel (0, y)
+        float qRow = 0.0f, uqRow = 0.0f, vqRow = 0.0f;  // perspective: 1/w, u/w, v/w at pixel (X0, y), near the polygon
+        float pieceK = 0.0f;                             // perspective: 4 MAG_PERSP_ERR / |d(1/w)/dx|
         if (!magColored) {
             if (Mag::perspective) {                      // 1/w varying noticeably over the polygon?
                 int32 qa = magBits(a->q), qb = qa;
@@ -209,21 +210,22 @@
                 vRow = uint32(a->v + (dv >> 4) * fx + (dvY >> 4) * fy) + uint32(dyRow) * uint32(dvY) - uint32(X0) * uint32(dv);
             } else {
                 float ax = float(a->x) * 0.0625f, ay = float(a->y) * 0.0625f;
-                float ox = 0.5f - ax, oy = float(y) + 0.5f - ay;
+                float ox = float(X0) + 0.5f - ax, oy = float(y) + 0.5f - ay;
                 float fb = b->q - a->q, fc = c->q - a->q;
                 qdx = fb * kbx + fc * kcx;
                 qdy = fb * kby + fc * kcy;
-                qRow = double(a->q) + double(ox * qdx) + double(oy * qdy);
+                qRow = a->q + ox * qdx + oy * qdy;
                 float ua = float(a->u) * a->q;
                 fb = float(b->u) * b->q - ua; fc = float(c->u) * c->q - ua;
                 udx = fb * kbx + fc * kcx;
                 udy = fb * kby + fc * kcy;
-                uqRow = double(ua) + double(ox) * udx + double(oy) * udy;
+                uqRow = ua + ox * udx + oy * udy;
                 float va = float(a->v) * a->q;
                 fb = float(b->v) * b->q - va; fc = float(c->v) * c->q - va;
                 vdx = fb * kbx + fc * kcx;
                 vdy = fb * kby + fc * kcy;
-                vqRow = double(va) + double(ox) * vdx + double(oy) * vdy;
+                vqRow = va + ox * vdx + oy * vdy;
+                pieceK = (4.0f * MAG_PERSP_ERR) / (magBits(qdx) < 0 ? -qdx : qdx);     // inf when qdx = 0: one piece
                 // 1/w the same all along each line (floors and ceilings: the camera never rolls)? Then a
                 // line is one exact affine span: u = (u/w) / (1/w) and its step (du/w) / (1/w), one divide.
                 // Here: 1/w changes by less than 1/4096 across the polygon's width.
@@ -332,37 +334,38 @@
                     Mag::span(swColor + offset, len, int32(uRow + uint32(xs) * uint32(du)), int32(vRow + uint32(xs) * uint32(dv)),
                               du, dv, l, dl, offset, z, dz2);
                 } else if (rowConst) {
-                    float fxs = float(xs);
-                    float r = 1.0f / (float(qRow) + fxs * qdx);
-                    float u0 = float(uqRow) + fxs * udx, v0 = float(vqRow) + fxs * vdx;
+                    float fxs = float(xs - X0);
+                    float r = 1.0f / (qRow + fxs * qdx);
+                    float u0 = uqRow + fxs * udx, v0 = vqRow + fxs * vdx;
                     Mag::span(swColor + offset, len, magInt(u0 * r), magInt(v0 * r), magInt(udx * r), magInt(vdx * r),
                               l, dl, offset, z, dz2);
                 } else {
                     // Affine pieces, as many as the error bound asks for; one piece when 1/w hardly
                     // changes along the span. Only pixel centres inside the polygon are evaluated
                     // (1/w > 0 there): the last piece ends on the last pixel.
-                    float fxs = float(xs);
-                    float q0 = float(qRow) + fxs * qdx, u0 = float(uqRow) + fxs * udx, v0 = float(vqRow) + fxs * vdx;
-                    float qe = q0 + qdx * float(len - 1);
-                    // one affine piece is off by about len * (ratio - 1) / 4 pixels, n pieces by 1 / n^2 of that.
-                    // Pieces are a power of two long (8..512), so a piece's steps are shifts of the integer
-                    // u, v at its ends; only the last piece, of any length, divides.
+                    // Both ends first: their divides overlap, and the last piece's end is the span's end.
+                    float fxs = float(xs - X0);
+                    float q0 = qRow + fxs * qdx, u0 = uqRow + fxs * udx, v0 = vqRow + fxs * vdx;
+                    int32 m = len - 1;
+                    float fm = float(m);
+                    float qe = q0 + qdx * fm, ue = u0 + udx * fm, ve = v0 + vdx * fm;
+                    float r = 1.0f / q0, re = 1.0f / qe;
+                    // One affine piece is off by about |dq/dx| len^2 / (4 qlo) pixels, a piece of S by S^2 / len^2 of that:
+                    // S^2 <= 4 ERR qlo / |dq/dx| = qlo * pieceK. Pieces are a power of two long (8..512), so a piece's
+                    // steps are shifts of the integer u, v at its ends; only the last piece, of any length, divides.
+                    // S = 2^floor(log2(x) / 2) read from the float's exponent. 1/w > 0 at the pixel centres drawn.
+                    int32 qlo = magBits(q0) < magBits(qe) ? magBits(q0) : magBits(qe);
+                    MagFI lo; lo.i = qlo;
+                    float x = lo.f * pieceK;
                     int32 sh = 12;                   // one piece
-                    {
-                        float qlo = q0 < qe ? q0 : qe;
-                        float e = (q0 < qe ? qe - q0 : q0 - qe) * float(len), t = qlo * (4.0f * MAG_PERSP_ERR);
-                        if (magBits(t - e) < 0) {
-                            // pieces of S pixels are off by e / t * (S / len)^2 of the bound: S^2 <= len^2 * t / e,
-                            // S = 2^floor(log2(x) / 2) read from the float's exponent
-                            float x = float(len * len) * t / e;
-                            sh = ((magBits(x) >> 23) - 127) >> 1;
-                            if (sh < 3) sh = 3;
-                            if (sh > 9) sh = 9;
-                        }
+                    if (magBits(x - float(m * len)) < 0) {
+                        sh = ((magBits(x) >> 23) - 127) >> 1;
+                        if (sh < 3) sh = 3;
+                        if (sh > 9) sh = 9;
                     }
+                    float uer = ue * re, ver = ve * re;
                     const int32 S = 1 << sh;
                     const float fS = float(S), qS = qdx * fS, uS = udx * fS, vS = vdx * fS;
-                    float r = 1.0f / q0;
                     int32 iua = magInt(u0 * r), iva = magInt(v0 * r);
                     while (len > S) {                // whole pieces
                         r = 1.0f / (q0 + qS);
@@ -373,13 +376,12 @@
                         iua = iub; iva = ivb;
                     }
                     {                                // the last piece: len pixels, its last centre len - 1 away
-                        int32 sdu = 0, sdv = 0, m = len - 1;
+                        int32 sdu = 0, sdv = 0;
+                        m = len - 1;
                         if (m > 0) {
-                            float fm = float(m);
-                            r = 1.0f / (q0 + qdx * fm);
-                            float rm = m < 1024 ? Mag::rcp[m] : 1.0f / fm;
-                            sdu = magInt(((u0 + udx * fm) * r - float(iua)) * rm);
-                            sdv = magInt(((v0 + vdx * fm) * r - float(iva)) * rm);
+                            float rm = m < 1024 ? Mag::rcp[m] : 1.0f / float(m);
+                            sdu = magInt((uer - float(iua)) * rm);
+                            sdv = magInt((ver - float(iva)) * rm);
                         }
                         Mag::span(swColor + offset, len, iua, iva, sdu, sdv, l, dl, offset, z, dz2);
                     }
