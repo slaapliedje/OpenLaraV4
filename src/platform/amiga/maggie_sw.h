@@ -176,6 +176,7 @@ namespace Mag {
     bool     bilinear = true;            // F8 toggles: filtered textures on 3D faces
     bool     roomCells = true;           // hardware back end: room cells outside the view skipped (ENV:OLNOCELLS)
     bool     normalCull = true;          // hardware back end: back faces dropped by their normal (ENV:OLNONCULL)
+    bool     cpuAlpha = true;            // ENV:OLNOALPHA: no CPU blending of translucent plain faces
     int      pickX = -1, pickY = 0;      // OL_EMU, OLPICK=x,y: print the polygons covering that pixel
     bool     mipmaps = true;             // F9 toggles (hardware back end): Maggie's automatic mip level
     bool     curFlat;                    // the bound texture is the white one (flat colour)

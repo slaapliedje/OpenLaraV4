@@ -1438,6 +1438,10 @@ struct Inventory {
     }
 
     void prepareBackground() {
+        #ifdef _GAPI_MAGGIE
+            GAPI::captureInventoryBackground();     // the frame just drawn, blurred and greyed on the CPU
+            return;
+        #endif
         #ifdef FFP
             return;
         #endif
@@ -1718,6 +1722,12 @@ struct Inventory {
     void renderTitleBG(float sx = 1.0f, float sy = 1.0f, uint8 alpha = 255, float cropW = 1.0f, float cropH = 1.0f) {
         float aspectSrc, ax, ay, tx, ty;
 
+        #ifdef _GAPI_MAGGIE
+            if (!video && !game->getLevel()->isTitle()) {   // in game: the frame the inventory opened over
+                Core::validateRenderState();
+                if (GAPI::drawInventoryBackground()) return;
+            }
+        #endif
         #if defined(_GAPI_SW) || defined(_GAPI_MAGGIE)
             if (background[0] && !video) {                   // RGBA picture (logo, title): copied in directly
                 Core::validateRenderState();                  // pending target clear first
@@ -1843,6 +1853,10 @@ struct Inventory {
     }
 
     void renderGameBG(int view) {
+    #ifdef _GAPI_MAGGIE
+        Core::validateRenderState();                  // pending target clear first
+        if (GAPI::drawInventoryBackground()) return;
+    #endif
         Index  indices[6] = { 0, 1, 2, 0, 2, 3 };
         Vertex vertices[4];
         vertices[0].coord = short4(-32767,  32767, 0, 1);

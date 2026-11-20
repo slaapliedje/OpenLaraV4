@@ -1642,6 +1642,11 @@ struct MeshBuilder {
             short2 uv = tile.texCoordAtlas[i];
 
             v.texCoord = short4( uv.x, uv.y, 32767, 32767 );
+        #ifdef _GAPI_MAGGIE
+            // a bar's colours are in its vertices (above): draw it as a plain face (the white texel)
+            if (&tile >= CommonTex && &tile < CommonTex + CTEX_MAX)
+                v.texCoord = short4( whiteSprite.texCoordAtlas[0].x, whiteSprite.texCoordAtlas[0].y, 32767, 32767 );
+        #endif
         }
 
         vCount += 4;

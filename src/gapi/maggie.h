@@ -556,7 +556,7 @@ namespace GAPI {
     // but the CPU reads Maggie's output correctly once the last span's tail has been pushed out
     // (vampire-v4-dev skill: magprobe stale/settle), so: Mag::sync(), then darken the pixels here.
     // Corner l = factor 0..256 << 16; depth tested against Maggie's buffer (<=), not written.
-    void magDrawMul(const MagPrim &pr) {
+    void magDrawMul(const MagPrim &pr, bool alpha = false) {
         MagVtx *const *p = pr.v;
         const int n = pr.n;
         int top = 0, bot = 0;
@@ -576,6 +576,11 @@ namespace GAPI {
         const int32 X0 = (a->x + 7) >> 4, Y0 = (a->y + 7) >> 4;
         const int32 fx = (X0 << 4) + 8 - a->x, fy = (Y0 << 4) + 8 - a->y;
         const bool zs = Mag::zOn && depthTest && Mag::zbuf;
+        uint32 col = 0;
+        if (alpha) {                     // the colour as RGB565, its fields spread over 32 bits
+            uint32 c16 = ((pr.tint >> 8) & 0xF800) | ((pr.tint >> 5) & 0x07E0) | ((pr.tint >> 3) & 0x001F);
+            col = (c16 | (c16 << 16)) & 0x07E0F81FU;
+        }
         float fb = float(b->z - a->z), fc = float(c->z - a->z);
         const int32 dz = int32(fb * kbx + fc * kcx), dzY = int32(fb * kby + fc * kcy);
         uint32 zRow = uint32(a->z + (dz >> 4) * fx + (dzY >> 4) * fy) + uint32(y - Y0) * uint32(dzY) - uint32(X0) * uint32(dz);
@@ -600,12 +605,18 @@ namespace GAPI {
                 for (int32 x = xs; x < xe; x++, px++, zp++, f += df, z += dz2) {
                     if (zs && uint16(z >> 16) > *zp) continue;
                     int32 k = f >> 11;                                          // 0..32
-                    if (k >= 32) continue;
                     if (k < 0) k = 0;
+                    if (k > 32) k = 32;
                     // RGB565 times k/32: green moved to the upper half so no field spills into another
                     uint32 cc = *px;
                     cc = (cc | (cc << 16)) & 0x07E0F81FU;
-                    cc = ((cc * uint32(k)) >> 5) & 0x07E0F81FU;
+                    if (alpha) {                                                // colour x k + frame x (32 - k)
+                        if (!k) continue;
+                        cc = ((cc * uint32(32 - k) + col * uint32(k)) >> 5) & 0x07E0F81FU;
+                    } else {                                                    // frame x k
+                        if (k == 32) continue;
+                        cc = ((cc * uint32(k)) >> 5) & 0x07E0F81FU;
+                    }
                     *px = uint16(cc | (cc >> 16));
                 }
             }
@@ -631,6 +642,7 @@ namespace GAPI {
         if (tex && tex->fmt != FMT_RGBA) tex = NULL;
         if (tex && (tex->dirty || !tex->dxt)) tex->encode();
         const bool blendAdd = blendMode == RS_BLEND_ADD, blendMul = blendMode == RS_BLEND_MULT;
+        const bool alphaDraw = blendMode == RS_BLEND_ALPHA || blendMode == RS_BLEND_PREMULT;
         const bool cutout = alphaTest || blendMode == RS_BLEND_ALPHA || blendMode == RS_BLEND_PREMULT || !depthTest;
         const bool needZ = Mag::zOn && depthTest;
         const bool flatDraw = vertices[vStart + indices[iStart]].color.w == 142;    // palette-coloured faces
@@ -968,9 +980,16 @@ namespace GAPI {
             }
             if (magDbgCulled && !behind) MAG_COUNT(6, 1);     // profiling: the normal test was wrong
             if (MAG_STAGE(6)) continue;
-            // no alpha blending in Maggie: mostly transparent faces (screen fades, faint overlays) are
-            // left out, the rest drawn solid
-            if (blendMode == RS_BLEND_ALPHA && vx[0]->light.w < 128) continue;
+            // no alpha blending in Maggie. Translucent plain-coloured faces (UI bar backgrounds, screen
+            // fades) are blended on the CPU after Maggie's spans (see the draw); textured ones that are
+            // mostly transparent are left out, the rest drawn solid
+            bool cpuAlpha = false;
+            if (alphaDraw && vx[0]->light.w < 250) {
+                cpuAlpha = Mag::cpuAlpha && !behind &&
+                           vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
+                           vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y;
+                if (!cpuAlpha && blendMode == RS_BLEND_ALPHA && vx[0]->light.w < 128) continue;
+            }
 
             // colour: vertex light (x face colour for palette-coloured faces) x lighting x distance fade.
             // Room faces carry it worked out at load (MeshBuilder::roomColours): used as it is when
@@ -1010,6 +1029,9 @@ namespace GAPI {
                         r = (r + 1 + (r >> 8)) >> 8; g = (g + 1 + (g >> 8)) >> 8; b = (b + 1 + (b >> 8)) >> 8;
                     }
                     r = (r * f) >> 8; g = (g * f) >> 8; b = (b * f) >> 8;            // f may be up to 512
+                    // 2D (the engine's gui shader): colour x material, 255 = full; magTint's scale has
+                    // 128 = full, as the 3D shaders double the vertex colour
+                    if (ortho) { r = (r + 1) >> 1; g = (g + 1) >> 1; b = (b + 1) >> 1; }
                     if ((r | g | b) > 255) { r = r > 255 ? 255 : r; g = g > 255 ? 255 : g; b = b > 255 ? 255 : b; }
                     rgb[k] = (uint32(r) << 16) | (uint32(g) << 8) | uint32(b);
                 }
@@ -1027,6 +1049,12 @@ namespace GAPI {
             // all corners on one texel: a plain coloured face (UI bars and frames)
             if (vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
                 vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y) tint |= 0x01000000;
+            if (cpuAlpha) {                  // the colour Maggie would draw, and the corners' alpha in l (0..256 << 16)
+                int32 in = (l[0] >> 15) + 1;
+                uint32 r = (((tint >> 16) & 255) * in) >> 16, g = (((tint >> 8) & 255) * in) >> 16, b = ((tint & 255) * in) >> 16;
+                tint = 0x02000000 | (r << 16) | (g << 8) | b;
+                for (int k = 0; k < count; k++) l[k] = (int32(vx[k]->light.w) + (vx[k]->light.w >> 7)) << 16;
+            }
 
             if (!clip) {
                 for (int k = 0; k < count; k++) {
@@ -1168,7 +1196,21 @@ namespace GAPI {
             for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDrawMul(*pr);
             return;
         }
-        for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDraw(*pr);
+        if (!alphaDraw) {
+            for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDraw(*pr);
+        } else {
+            // in order: translucent plain faces on the CPU, over what Maggie has drawn so far
+            bool pending = false;        // Maggie spans not yet known to be in memory
+            for (const MagPrim *pr = magPrimBuf; pr < po; pr++) {
+                if (pr->tint & 0x02000000) {
+                    if (pending) { Mag::sync(); pending = false; }
+                    magDrawMul(*pr, true);
+                } else {
+                    magDraw(*pr);
+                    pending = true;
+                }
+            }
+        }
     #ifdef OL_EMU
         if (Mag::pickX >= 0 && swColor[Mag::pickY * Core::width + Mag::pickX] != pickBefore)
             printf("PIX %04x -> %04x: iStart %d iCount %d prims %d tex %p flat %d blend %d depth %d/%d mode size %x\n", pickBefore,
@@ -1205,6 +1247,62 @@ namespace GAPI {
         }
         Mag::sync();                     // nothing still being drawn into the frame
         memcpy(swColor, swBackground, W * H * sizeof(ColorSW));
+    }
+
+    // The inventory's backdrop: the game frame it opened over, blurred and greyed as the engine's
+    // shaders do it (Inventory::prepareBackground). Taken from the frame buffer on the CPU, which reads
+    // Maggie's output correctly after Mag::sync() (vampire-v4-dev skill).
+    ColorSW *swInvBg = NULL;
+    int      swInvBgW = 0, swInvBgH = 0;
+    bool     swInvBgValid = false;
+
+    void captureInventoryBackground() {
+        int W = Core::width, H = Core::height;
+        if (!swInvBg || swInvBgW != W || swInvBgH != H) {
+            delete[] swInvBg;
+            swInvBg = new ColorSW[W * H];
+            swInvBgW = W; swInvBgH = H;
+        }
+        uint8 *lum = new uint8[W * H], *tmp = new uint8[W * H];
+        Mag::sync();
+        for (int i = 0; i < W * H; i++) {
+            uint32 c = swColor[i];
+            uint32 r = (c >> 11) << 3, g = ((c >> 5) & 63) << 2, b = (c & 31) << 3;
+            lum[i] = uint8((r * 77 + g * 150 + b * 29) >> 8);
+        }
+        // a 5-tap box blur each way, twice (about a 9-pixel soft blur)
+        for (int pass = 0; pass < 2; pass++) {
+            for (int y = 0; y < H; y++) {
+                const uint8 *s = lum + y * W; uint8 *d = tmp + y * W;
+                for (int x = 0; x < W; x++) {
+                    int x0 = x < 2 ? 0 : x - 2, x1 = x + 2 >= W ? W - 1 : x + 2, sum = 0;
+                    for (int k = x0; k <= x1; k++) sum += s[k];
+                    d[x] = uint8(sum / (x1 - x0 + 1));
+                }
+            }
+            for (int y = 0; y < H; y++) {
+                int y0 = y < 2 ? 0 : y - 2, y1 = y + 2 >= H ? H - 1 : y + 2;
+                for (int x = 0; x < W; x++) {
+                    int sum = 0;
+                    for (int k = y0; k <= y1; k++) sum += tmp[k * W + x];
+                    lum[y * W + x] = uint8(sum / (y1 - y0 + 1));
+                }
+            }
+        }
+        // grey with a cool cast, dimmed (matches the GL reference's backdrop)
+        for (int i = 0; i < W * H; i++) {
+            uint32 l = lum[i];
+            swInvBg[i] = CONV_COLOR((l * 145) >> 8, (l * 150) >> 8, (l * 210) >> 8);
+        }
+        delete[] lum; delete[] tmp;
+        swInvBgValid = true;
+    }
+
+    bool drawInventoryBackground() {
+        if (!swInvBgValid || swInvBgW != Core::width || swInvBgH != Core::height) return false;
+        Mag::sync();
+        memcpy(swColor, swInvBg, swInvBgW * swInvBgH * sizeof(ColorSW));
+        return true;
     }
 
     vec4 copyPixel(int x, int y) {

@@ -11,7 +11,8 @@ set -e
 TC=${TC:-$HOME/dev/toolchains/amigaos}
 CXX=$TC/bin/m68k-amigaos-g++
 CC=$TC/bin/m68k-amigaos-gcc
-FLAGS="-m68060 -mhard-float -O2 -fbbb=- -fomit-frame-pointer -DNDEBUG -D__AMIGA__"
+# -falign-*: the 68080 is sensitive to where hot loops sit (a 2-3 ms swing on LEVEL2 from unrelated edits); aligned, timings are stable
+FLAGS="-m68060 -mhard-float -O2 -fbbb=- -fomit-frame-pointer -falign-loops=16 -falign-jumps=16 -falign-functions=16 -falign-labels=8 -DNDEBUG -D__AMIGA__ ${EXTRA:-}"
 OUT=OpenLara; B=build
 for a in "$@"; do
   case $a in

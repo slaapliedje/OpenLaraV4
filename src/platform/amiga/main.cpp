@@ -545,6 +545,7 @@ __attribute__((noinline)) static int olMain()
     if (GetVar((STRPTR)"OLNONCULL", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::normalCull = false;    // ENV:OLNONCULL
     if (GetVar((STRPTR)"OLNOCELLS", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::roomCells = false;     // ENV:OLNOCELLS
     if (GetVar((STRPTR)"OLPICK", (STRPTR)envTmp, sizeof(envTmp), 0) > 0) sscanf(envTmp, "%d,%d", &Mag::pickX, &Mag::pickY);
+    if (GetVar((STRPTR)"OLNOALPHA", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::cpuAlpha = false;   // ENV:OLNOALPHA
     if (GetVar((STRPTR)"OLNOMIP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::mipmaps = false;         // ENV:OLNOMIP
     if (GetVar((STRPTR)"OLNOBILINEAR", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::bilinear = false; // ENV:OLNOBILINEAR
 #endif
