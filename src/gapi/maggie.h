@@ -631,6 +631,14 @@ namespace GAPI {
     // and the projection's: row z of magM, then 1, 16 and the depth scale
     float magZA[7];
 
+    // equality of n longs (libnix memcmp goes a byte at a time: ~250 cycles per matrix)
+    inline bool magSame(const void *a, const void *b, int nLongs) {
+        const uint32 *p = (const uint32*)a, *q = (const uint32*)b;
+        uint32 d = 0;
+        for (int i = 0; i < nLongs; i++) d |= p[i] ^ q[i];
+        return d == 0;
+    }
+
     void DIP(Mesh *mesh, const MeshRange &range) {
         if (MAG_STAGE(4)) return;
         const Index  *indices  = mesh->iBuffer;
@@ -676,7 +684,7 @@ namespace GAPI {
         // Everything that depends only on the matrices is kept while they stay the same: a room's draw
         // calls (one per texture tile) share them, and many of their corners.
         bool sameView = magScreenProjValid && magScreenW == Core::width && magScreenH == Core::height &&
-                        memcmp(&magViewProj, &mViewProj, sizeof(mat4)) == 0;
+                        magSame(&magViewProj, &mViewProj, 16);
         if (!sameView) {
             mat4 vp;
             vp.viewport(0.0f, (float)Core::height, (float)Core::width, -(float)Core::height, 0.0f, 1.0f);
@@ -685,9 +693,8 @@ namespace GAPI {
             magScreenW = Core::width; magScreenH = Core::height;
             magScreenProjValid = true;
         }
-        if (!sameView || magXformStamp == 0 || magFogDirty || memcmp(&mModel, &magModel, sizeof(mat4)) != 0 ||
-            memcmp(&Core::viewPos, &magViewPos, sizeof(vec4)) != 0 ||
-            memcmp(&swClipRect, &magXformClip, sizeof(short4)) != 0) {
+        if (!sameView || magXformStamp == 0 || magFogDirty || !magSame(&mModel, &magModel, 16) ||
+            !magSame(&Core::viewPos, &magViewPos, 4) || !magSame(&swClipRect, &magXformClip, 2)) {
             magFogDirty = false;
             magModel = mModel;
             magViewPos = Core::viewPos;
