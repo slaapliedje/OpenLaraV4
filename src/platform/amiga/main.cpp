@@ -676,6 +676,7 @@ __attribute__((noinline)) static int olMain()
 
 #ifdef OL_PROFILE
     printf("ENC %u textures %u texels\n", Mag::encodes, Mag::encodeTexels);
+    printf("LIGHT corners %u lightsChecked %u lightsReaching %u\n", Mag::cnt[10], Mag::cnt[8], Mag::cnt[9]);
     printf("CNT polys %u corners %u drawn %u spans %u pixels %u c5 %u cells %u skipped %u loops %d\n", Mag::cnt[0], Mag::cnt[1], Mag::cnt[2], Mag::cnt[3], Mag::cnt[4], Mag::cnt[5], Mag::cnt[6], Mag::cnt[7], loopFrame);
 #endif
     if (sound) sndStop();

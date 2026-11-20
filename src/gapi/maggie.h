@@ -477,6 +477,7 @@ namespace GAPI {
         float x = float(vx.coord.x), y = float(vx.coord.y), z = float(vx.coord.z);
         float nx = float(vx.normal.x), ny = float(vx.normal.y), nz = float(vx.normal.z);    // length 32767
         float sum = 0.0f;
+        MAG_COUNT(10, 1); MAG_COUNT(8, lightsCount);
         for (int i = 0; i < lightsCount; i++) {
             const LightSW &light = lightsRel[i];
             float dx = (light.pos.x - x) * light.radius, dy = (light.pos.y - y) * light.radius, dz = (light.pos.z - z) * light.radius;
@@ -484,6 +485,7 @@ namespace GAPI {
             if (magBits(att) >= 0x3F800000) continue;        // beyond the light's radius
             float lum = nx * dx + ny * dy + nz * dz;
             if (magBits(lum) <= 0) continue;                 // facing away
+            MAG_COUNT(9, 1);
             sum += lum * (1.0f - att) * light.intensity / sqrtf(att);
         }
         int32 f = int32((ambient + sum * (1.0f / 32767.0f)) * 256.0f);
