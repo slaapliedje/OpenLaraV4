@@ -545,6 +545,7 @@ __attribute__((noinline)) static int olMain()
     if (GetVar((STRPTR)"OLNONCULL", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::normalCull = false;    // ENV:OLNONCULL
     if (GetVar((STRPTR)"OLNOCELLS", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::roomCells = false;     // ENV:OLNOCELLS
     if (GetVar((STRPTR)"OLPICK", (STRPTR)envTmp, sizeof(envTmp), 0) > 0) sscanf(envTmp, "%d,%d", &Mag::pickX, &Mag::pickY);
+    if (GetVar((STRPTR)"OLPERSPERR", (STRPTR)envTmp, sizeof(envTmp), 0) > 0) { int e = atoi(envTmp); if (e >= 1 && e <= 8) Mag::perspErr = float(e); }
     if (GetVar((STRPTR)"OLNOALPHA", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::cpuAlpha = false;   // ENV:OLNOALPHA
     if (GetVar((STRPTR)"OLNOMIP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::mipmaps = false;         // ENV:OLNOMIP
     if (GetVar((STRPTR)"OLNOBILINEAR", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::bilinear = false; // ENV:OLNOBILINEAR
@@ -674,6 +675,7 @@ __attribute__((noinline)) static int olMain()
     }
 
 #ifdef OL_PROFILE
+    printf("ENC %u textures %u texels\n", Mag::encodes, Mag::encodeTexels);
     printf("CNT polys %u corners %u drawn %u spans %u pixels %u c5 %u cells %u skipped %u loops %d\n", Mag::cnt[0], Mag::cnt[1], Mag::cnt[2], Mag::cnt[3], Mag::cnt[4], Mag::cnt[5], Mag::cnt[6], Mag::cnt[7], loopFrame);
 #endif
     if (sound) sndStop();

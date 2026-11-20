@@ -123,6 +123,9 @@ namespace GAPI {
         // DXT1 copies, made when the texture is first drawn (the title pictures never are: they are
         // copied to the screen)
         void encode() {
+        #ifdef OL_PROFILE
+            Mag::encodes++; Mag::encodeTexels += width * height;
+        #endif
             dirty = false;
             int side = width > height ? width : height;
             int log2 = 5;

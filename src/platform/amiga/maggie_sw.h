@@ -164,7 +164,7 @@ namespace Mag {
     bool     perspective = true;         // F6 toggles: spans split into perspective-correct pieces
     #define  MAG_PERSP_STEP 64           // pixels per affine piece
     #define  MAG_PERSP_RATIO 1.3f        // 1/w varying less than this across a polygon/span: affine
-    #define  MAG_PERSP_ERR   1.0f        // hardware back end: pixels a texel may be off through affine texturing
+    #define  MAG_PERSP_ERR   Mag::perspErr   // pixels a texel may be off through affine texturing (ENV:OLPERSPERR)
     bool     zEnabled = true;            // F7 toggles
     uint8   *zMem;
     uint16  *zbuf;
@@ -176,6 +176,8 @@ namespace Mag {
     bool     bilinear = true;            // F8 toggles: filtered textures on 3D faces
     bool     roomCells = true;           // hardware back end: room cells outside the view skipped (ENV:OLNOCELLS)
     bool     normalCull = true;          // hardware back end: back faces dropped by their normal (ENV:OLNONCULL)
+    float    perspErr = 1.0f;            // ENV:OLPERSPERR: 2 is 2-3 ms faster on LEVEL2/8A, textures may sit 2 px off
+    uint32   encodes = 0, encodeTexels = 0;   // OL_PROFILE: textures (re-)encoded to DXT1
     bool     cpuAlpha = true;            // ENV:OLNOALPHA: no CPU blending of translucent plain faces
     int      pickX = -1, pickY = 0;      // OL_EMU, OLPICK=x,y: print the polygons covering that pixel
     bool     mipmaps = true;             // F9 toggles (hardware back end): Maggie's automatic mip level
