@@ -62,6 +62,13 @@ namespace GAPI {
         void setParam(UniformType uType, const mat4  &value, int count = 1) {}
     };
 
+    // Overbright: textures are stored 16/13 brighter and textured corners' intensity scale is
+    // 514 * 13/16, so light up to 1.23x the plain texture shows instead of clipping (Maggie can only
+    // darken a texel). Plain faces (the white texel) keep 514.
+    #define MAG_OVERBRIGHT 1
+    #define MAG_I_TEX   (MAG_OVERBRIGHT ? 418 : 514)
+    #define MAG_I_PLAIN 514
+
 // Texture
     struct Texture;
     Texture *curTex = NULL;              // bound to sDiffuse
@@ -139,6 +146,14 @@ namespace GAPI {
                     for (int x = w; x < size; x++) memcpy(out + x * 4, row + (w - 1) * 4, 4);
                 }
                 src = tmp;
+            }
+            // Overbright: Maggie can only darken a texel, but the engine lights up to twice the plain
+            // texture. Textures are stored 16/13 brighter and textured corners' intensity scaled by 13/16
+            // (see magOverbright), so light up to 1.23x shows instead of clipping.
+            if (MAG_OVERBRIGHT) {
+                if (!tmp) { tmp = new uint8[size * size * 4]; memcpy(tmp, src, size * size * 4); src = tmp; }
+                for (int i = 0, n = size * size * 4; i < n; i += 4)
+                    for (int c = 0; c < 3; c++) { int v = (tmp[i + c] * 16 + 6) / 13; tmp[i + c] = uint8(v > 255 ? 255 : v); }
             }
             bool anyAlpha = false;
             for (int i = 0, n = size * size; i < n && !anyAlpha; i++) anyAlpha = src[i * 4 + 3] < 128;
@@ -503,7 +518,7 @@ namespace GAPI {
     // Colour of a polygon's corners -> one RGB tint (the brightest corner's hue, at full strength)
     // and an intensity per corner (<< 15, kept off both ends: see the span's light).
     // rgb[k]: 0x00RRGGBB with channels 0..255.
-    inline uint32 magTint(const uint32 *rgb, int count, int32 *l) {
+    inline uint32 magTint(const uint32 *rgb, int count, int32 *l, int32 scale = MAG_I_PLAIN) {
         int32 mx[4], best = 0, bi = 0;
         bool grey = true;
         for (int k = 0; k < count; k++) {
@@ -515,7 +530,7 @@ namespace GAPI {
             if (m > best) { best = m; bi = k; }
         }
         for (int k = 0; k < count; k++) {
-            int32 i = mx[k] * 514;           // 128 = the plain texture, as in the engine's shaders; brighter clamps
+            int32 i = mx[k] * scale;         // 128 = the plain texture (scale 514), as in the engine's shaders; brighter clamps
             l[k] = (i < 16 ? 16 : (i > 0xFFEF ? 0xFFEF : i)) << 15;
         }
         if (grey || best == 0) return 0xFFFFFF;
@@ -1003,12 +1018,17 @@ namespace GAPI {
             // no light and no fade applies.
             int32  l[4];
             uint32 tint;
+            // textured faces use the overbright scale (their texels are stored brighter); plain ones (the
+            // white texel: untextured draws, all corners on one texel) the plain one
+            const int32 iScale = (tex && !(vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
+                                          vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y))
+                                 ? MAG_I_TEX : MAG_I_PLAIN;
         #ifdef ROOM_COLOUR_DONE
             if (!lit && !clip && vx[0]->color.w == ROOM_COLOUR_DONE) {
                 const ubyte4 &c = vx[0]->color;
                 tint = (uint32(c.x) << 16) | (uint32(c.y) << 8) | c.z;
                 for (int k = 0; k < count; k++) {
-                    int32 i = ((vx[k]->texCoord.z * e[k]->fog) >> 8) * 514;     // as the loop below and magTint
+                    int32 i = ((vx[k]->texCoord.z * e[k]->fog) >> 8) * iScale;  // as the loop below and magTint
                     l[k] = (i < 16 ? 16 : (i > 0xFFEF ? 0xFFEF : i)) << 15;
                 }
             } else
@@ -1042,7 +1062,7 @@ namespace GAPI {
                     if ((r | g | b) > 255) { r = r > 255 ? 255 : r; g = g > 255 ? 255 : g; b = b > 255 ? 255 : b; }
                     rgb[k] = (uint32(r) << 16) | (uint32(g) << 8) | uint32(b);
                 }
-                tint = magTint(rgb, count, l);
+                tint = magTint(rgb, count, l, iScale);
             }
             if (magWater && !ortho)
                 tint = ((((tint >> 16) & 255) * 154 >> 8) << 16) | ((((tint >> 8) & 255) * 230 >> 8) << 8) | ((tint & 255) * 230 >> 8);
