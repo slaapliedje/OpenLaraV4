@@ -552,27 +552,67 @@ namespace GAPI {
     float  magPlane[6][7];               // clip planes in object space: x y z w, then |x| |y| |z|
     uint32 magLightsVersion = 1, magLightsFor = 0;   // lightsRel is current for this light set and model
 
-    // Multiply blending (Lara's blob shadow): Maggie has no blending on current cores, and the CPU
-    // cannot read back what Maggie drew (stale data cache), so the shadow is a screen-door of black
-    // pixels - one in four in the middle, one in eight in the fading ring - from two 32x32 textures
-    // mapped one texel per pixel.
-    uint8 *magStippleMem[2] = { NULL, NULL }, *magStipple[2] = { NULL, NULL };
-
-    bool magStippleInit() {
-        if (magStipple[0] && magStipple[1]) return true;
-        uint8 *rgba = new uint8[32 * 32 * 4];
-        for (int t = 0; t < 2; t++) {
-            for (int y = 0; y < 32; y++)
-                for (int x = 0; x < 32; x++) {
-                    bool on = t == 0 ? ((x + 2 * y) & 3) == 0 : ((y & 1) == 0 && ((x + y) & 3) == 0);
-                    uint8 *o = rgba + (y * 32 + x) * 4;
-                    o[0] = o[1] = o[2] = 0; o[3] = on ? 255 : 0;
-                }
-            if (!magStipple[t]) magStipple[t] = Mag::allocTex(32 * 32 / 2, &magStippleMem[t]);
-            if (magStipple[t]) Mag::encodeRGBA(rgba, 32, 32, magStipple[t], true);
+    // Multiply blending (Lara's blob shadow) on the CPU. Maggie has no blending on current cores,
+    // but the CPU reads Maggie's output correctly once the last span's tail has been pushed out
+    // (vampire-v4-dev skill: magprobe stale/settle), so: Mag::sync(), then darken the pixels here.
+    // Corner l = factor 0..256 << 16; depth tested against Maggie's buffer (<=), not written.
+    void magDrawMul(const MagPrim &pr) {
+        MagVtx *const *p = pr.v;
+        const int n = pr.n;
+        int top = 0, bot = 0;
+        for (int i = 1; i < n; i++) {
+            if (p[i]->y < p[top]->y) top = i;
+            if (p[i]->y > p[bot]->y) bot = i;
         }
-        delete[] rgba;
-        return magStipple[0] && magStipple[1];
+        const int32 clipX1 = swClipRect.x, clipX2 = swClipRect.z;
+        int32 y = (p[top]->y + 7) >> 4, yEnd = (p[bot]->y + 7) >> 4;
+        if (y < swClipRect.y) y = swClipRect.y;
+        if (yEnd > swClipRect.w) yEnd = swClipRect.w;
+        if (y >= yEnd) return;
+        const MagVtx *a = p[0], *b = p[1], *c = p[2];
+        float inv = 0.0625f / pr.area;
+        float kbx = float(c->y - a->y) * inv, kcx = float(a->y - b->y) * inv;
+        float kby = float(a->x - c->x) * inv, kcy = float(b->x - a->x) * inv;
+        const int32 X0 = (a->x + 7) >> 4, Y0 = (a->y + 7) >> 4;
+        const int32 fx = (X0 << 4) + 8 - a->x, fy = (Y0 << 4) + 8 - a->y;
+        const bool zs = Mag::zOn && depthTest && Mag::zbuf;
+        float fb = float(b->z - a->z), fc = float(c->z - a->z);
+        const int32 dz = int32(fb * kbx + fc * kcx), dzY = int32(fb * kby + fc * kcy);
+        uint32 zRow = uint32(a->z + (dz >> 4) * fx + (dzY >> 4) * fy) + uint32(y - Y0) * uint32(dzY) - uint32(X0) * uint32(dz);
+        const uint32 dz2 = uint32(dz) << 1;
+        MagEdge L, R;
+        L.i = R.i = top;
+        L.yEnd = R.yEnd = y;
+        const int32 pitch = Core::width;
+        for (; y < yEnd; y++) {
+            if (y >= L.yEnd && !magEdgeNext(L, p, n, n - 1, y, bot)) break;
+            if (y >= R.yEnd && !magEdgeNext(R, p, n, 1, y, bot)) break;
+            int32 xa = (L.x + 0x7FFF) >> 16, xb = (R.x + 0x7FFF) >> 16;
+            int32 xs = xa < clipX1 ? clipX1 : xa;
+            int32 xe = xb > clipX2 ? clipX2 : xb;
+            if (xe > xs) {
+                int32 w = xb - xa;
+                int32 f = L.l >> 8, df = w > 0 ? ((R.l >> 8) - f) / w : 0;     // factor, 8.8
+                f += df * (xs - xa);
+                uint32 z = (zRow + uint32(xs) * uint32(dz)) << 1;
+                uint16 *px = swColor + y * pitch + xs;
+                const uint16 *zp = Mag::zbuf + y * pitch + xs;
+                for (int32 x = xs; x < xe; x++, px++, zp++, f += df, z += dz2) {
+                    if (zs && uint16(z >> 16) > *zp) continue;
+                    int32 k = f >> 11;                                          // 0..32
+                    if (k >= 32) continue;
+                    if (k < 0) k = 0;
+                    // RGB565 times k/32: green moved to the upper half so no field spills into another
+                    uint32 cc = *px;
+                    cc = (cc | (cc << 16)) & 0x07E0F81FU;
+                    cc = ((cc * uint32(k)) >> 5) & 0x07E0F81FU;
+                    *px = uint16(cc | (cc >> 16));
+                }
+            }
+            L.x += L.sx; L.l += L.sl;
+            R.x += R.sx; R.l += R.sl;
+            zRow += uint32(dzY);
+        }
     }
 
     // what the corner transform's assembly reads: rows w, x, y of magM, and the scissor rectangle
@@ -977,8 +1017,13 @@ namespace GAPI {
             }
             if (magWater && !ortho)
                 tint = ((((tint >> 16) & 255) * 154 >> 8) << 16) | ((((tint >> 8) & 255) * 230 >> 8) << 8) | ((tint & 255) * 230 >> 8);
-            if (blendMul)                    // how dark: the vertex colour, black in the middle (see the draw below)
-                for (int k = 0; k < count; k++) l[k] = int32(vx[k]->light.x) << 16;
+            if (blendMul) {                  // the factor, as the engine's flash shader: colour * diffuse * 2 + alpha, at most 1
+                int32 al = int32(Core::active.material.w * 256.0f), di = int32(Core::active.material.x * 512.0f);
+                for (int k = 0; k < count; k++) {
+                    int32 f = al + ((int32(vx[k]->light.x) * di) >> 8);
+                    l[k] = (f < 0 ? 0 : (f > 256 ? 256 : f)) << 16;
+                }
+            }
             // all corners on one texel: a plain coloured face (UI bars and frames)
             if (vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
                 vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y) tint |= 0x01000000;
@@ -1118,23 +1163,9 @@ namespace GAPI {
         const uint16 pickBefore = Mag::pickX >= 0 ? swColor[Mag::pickY * Core::width + Mag::pickX] : 0;
     #endif
         if (blendMul) {
-            if (po == magPrimBuf || !magStippleInit()) return;
-            // dense where every corner is dark; then texture = screen position, one texel per pixel
-            for (MagPrim *pr = magPrimBuf; pr < po; pr++) {
-                int32 sum = 0;
-                for (int k = 0; k < pr->n; k++) sum += pr->v[k]->l >> 16;
-                pr->tint = sum < 64 * pr->n ? 0 : 1;
-            }
-            for (MagVtx *v = magVtxBuf; v < vo; v++) { v->u = v->x << 15; v->v = v->y << 15; v->q = 1.0f; v->l = 0x7FFF << 15; }
-            Mag::setMode(0x0004 | (needZ ? 0x000A : 0));     // nearest, depth tested but not written
-            const uint8 *keepTex = magDipTex; const uint16 keepSize = magDipSize;
-            magDipSize = 5;
-            for (MagPrim *pr = magPrimBuf; pr < po; pr++) {
-                magDipTex = magStipple[pr->tint];
-                pr->tint = 0;
-                magDraw(*pr);
-            }
-            magDipTex = (uint8*)keepTex; magDipSize = keepSize;
+            if (po == magPrimBuf) return;
+            Mag::sync();                     // Maggie's pixels and depths are in memory
+            for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDrawMul(*pr);
             return;
         }
         for (const MagPrim *pr = magPrimBuf; pr < po; pr++) magDraw(*pr);
