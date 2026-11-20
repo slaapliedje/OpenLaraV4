@@ -1302,22 +1302,25 @@ namespace GAPI {
             uint32 r = (c >> 11) << 3, g = ((c >> 5) & 63) << 2, b = (c & 31) << 3;
             lum[i] = uint8((r * 77 + g * 150 + b * 29) >> 8);
         }
-        // a 5-tap box blur each way, twice (about a 9-pixel soft blur)
+        // a 4-tap box blur each way, twice (about a 7-pixel soft blur), as running sums: the first
+        // version divided per pixel and took a noticeable moment at 640x480
         for (int pass = 0; pass < 2; pass++) {
-            for (int y = 0; y < H; y++) {
-                const uint8 *s = lum + y * W; uint8 *d = tmp + y * W;
+            for (int y = 0; y < H; y++) {                 // rows: average of x-1 .. x+2
+                const uint8 *sr = lum + y * W; uint8 *d = tmp + y * W;
+                int sum = sr[0] + sr[0] + sr[1] + sr[2 < W ? 2 : W - 1];
                 for (int x = 0; x < W; x++) {
-                    int x0 = x < 2 ? 0 : x - 2, x1 = x + 2 >= W ? W - 1 : x + 2, sum = 0;
-                    for (int k = x0; k <= x1; k++) sum += s[k];
-                    d[x] = uint8(sum / (x1 - x0 + 1));
+                    d[x] = uint8(sum >> 2);
+                    int out = sr[x > 0 ? x - 1 : 0], in = sr[x + 3 < W ? x + 3 : W - 1];
+                    sum += in - out;
                 }
             }
-            for (int y = 0; y < H; y++) {
-                int y0 = y < 2 ? 0 : y - 2, y1 = y + 2 >= H ? H - 1 : y + 2;
-                for (int x = 0; x < W; x++) {
-                    int sum = 0;
-                    for (int k = y0; k <= y1; k++) sum += tmp[k * W + x];
-                    lum[y * W + x] = uint8(sum / (y1 - y0 + 1));
+            for (int x = 0; x < W; x++) {                 // columns, the same
+                const uint8 *sc = tmp + x; uint8 *d = lum + x;
+                int sum = sc[0] + sc[0] + sc[W] + sc[(2 < H ? 2 : H - 1) * W];
+                for (int y = 0; y < H; y++) {
+                    d[y * W] = uint8(sum >> 2);
+                    int out = sc[(y > 0 ? y - 1 : 0) * W], in = sc[(y + 3 < H ? y + 3 : H - 1) * W];
+                    sum += in - out;
                 }
             }
         }

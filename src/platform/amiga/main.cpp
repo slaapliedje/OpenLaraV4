@@ -314,6 +314,13 @@ static bool videoInit()
     window = OpenWindowTags(NULL, WA_CustomScreen, (ULONG)screen, WA_Width, screen->Width, WA_Height, screen->Height,
                             WA_Flags, WFLG_ACTIVATE | WFLG_RMBTRAP | WFLG_BACKDROP | WFLG_BORDERLESS,
                             WA_IDCMP, IDCMP_RAWKEY, TAG_DONE);
+    // no mouse pointer over the game: an empty sprite image for our window (Intuition shows it
+    // while the window is active; the system pointer is back when it closes)
+    if (window) {
+        static UWORD *blankPointer = NULL;
+        if (!blankPointer) blankPointer = (UWORD*)AllocVec(6 * sizeof(UWORD), MEMF_CHIP | MEMF_CLEAR);
+        if (blankPointer) SetPointer(window, blankPointer, 1, 16, 0, 0);
+    }
     ULONG base = 0, bpr = 0;
     APTR lock = LockBitMapTags(screen->RastPort.BitMap, LBMI_BASEADDRESS, (ULONG)&base, LBMI_BYTESPERROW, (ULONG)&bpr, TAG_DONE);
     if (lock) UnLockBitMap(lock);
@@ -341,7 +348,7 @@ static bool videoInit()
 static void videoFree()
 {
     if (screen && sagaOld) { *SAGA_GFXADDR = sagaOld; WaitTOF(); WaitTOF(); }
-    if (window) CloseWindow(window);
+    if (window) { ClearPointer(window); CloseWindow(window); }
     if (screen) CloseScreen(screen);
     if (fbMem) FreeVec(fbMem);
     if (CyberGfxBase) CloseLibrary(CyberGfxBase);
@@ -649,6 +656,16 @@ __attribute__((noinline)) static int olMain()
         if (frames % 50 == 49) {          // remote quit (tools: RAM:olquit)
             BPTR l = Lock((STRPTR)"RAM:olquit", ACCESS_READ);
             if (l) { UnLock(l); DeleteFile((STRPTR)"RAM:olquit"); break; }
+            // remote setting: RAM:olerr holding a number 1..8 sets the texture error bound (OLPERSPERR) live
+            l = Lock((STRPTR)"RAM:olerr", ACCESS_READ);
+            if (l) {
+                UnLock(l);
+                FILE *ef = fopen("RAM:olerr", "r");
+                int e = 0;
+                if (ef) { if (fscanf(ef, "%d", &e) != 1) e = 0; fclose(ef); }
+                DeleteFile((STRPTR)"RAM:olerr");
+                if (e >= 1 && e <= 8) { Mag::perspErr = float(e); printf("texture error bound now %d px\n", e); fflush(stdout); }
+            }
             // remote screenshot: RAM:olshot -> RAM:olshot-NNNN.raw (the frame on screen, 320x240 RGB565)
             l = Lock((STRPTR)"RAM:olshot", ACCESS_READ);
             if (l) {

@@ -1,5 +1,7 @@
 #!/bin/bash
 # cmp.sh LEVEL SCRIPT NAME [LOOPS]: same scripted run on the V4 (off-screen, real Maggie, 640x480) and the GL reference; sheets in cmp/NAME
+# never run beside another Maggie program: refuse while RAM:v4-busy exists (written by every launcher, incl. live runs)
+if timeout 15 rsh -n ${V4_HOST:?set V4_HOST to the address of the V4} 'C:List RAM:v4-busy NOHEAD' 2>/dev/null | grep -q v4-busy; then echo "V4 busy (RAM:v4-busy exists): not running" >&2; exit 3; fi
 V=${V4_HOST:?set V4_HOST to the address of the V4}; S=${CMP_OUT:-/tmp/olcmp}; L=$1; SC=$2; N=$3; FR=${4:-680}
 O=$S/cmp/$N; mkdir -p $O; rm -f $O/*
 cd $(git rev-parse --show-toplevel)/src/platform/amiga
