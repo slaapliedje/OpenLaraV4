@@ -64,6 +64,12 @@
 #endif
 
 // --- rasteriser ---------------------------------------------------------------------------------
+// magDraw finds the polygon's rows and picks one of three walkers: small polygons (one texel), affine
+// (all integer, the common case) and perspective. Each is its own function, so the cheap ones do not
+// pay for the registers the perspective one saves on entry, and each is specialised (templates) on
+// what a polygon keeps for all its rows (light plane or edge light, depth on or off), so no row tests
+// them. Edges are walked in runs: the inner loop goes from one corner to the next with both edges in
+// locals (registers); a new edge is set up between runs.
     struct MagEdge {
         int32 x, sx;                     // 16.16 x at the centre of the current line, step per line
         int32 l, sl;                     // intensity << 15
@@ -71,8 +77,15 @@
         int   i;                         // vertex it ends at
     };
 
+    struct MagRows {                     // what every walker gets from magDraw
+        MagVtx *const *p;
+        int     n, top, bot;
+        int32   y, yEnd;                 // lines drawn, clipped to the screen
+        int32   xmin, xmax;              // 28.4
+    };
+
     // the next edge of a chain (dir: +1 right side, n - 1 left side) that covers line y
-    inline bool magEdgeNext(MagEdge &e, MagVtx *const *p, int n, int dir, int32 y, int bottom) {
+    __attribute__((noinline)) bool magEdgeNext(MagEdge &e, MagVtx *const *p, int n, int dir, int32 y, int bottom) {
         int from;
         do {
             from = e.i;
@@ -94,247 +107,224 @@
         return true;
     }
 
+    // Edge walking shared by the walkers. Expects locals y, yEnd, R (the MagRows) and runs ROW for
+    // every line from y to yEnd with xL, xR (16.16) and lL, lR (light << 15) at the line's centre.
+    // ROW must not change them, and sees the line number y only in the emulator build (trace).
+    // Leaves y on the first line not drawn.
+    #define MAG_WALK(...) {                                                                              \
+        MagEdge eL, eR;                                                                              \
+        eL.i = eR.i = R.top;                                                                         \
+        int32 xL = 0, sxL = 0, lL = 0, slL = 0, yeL = y;                                             \
+        int32 xR = 0, sxR = 0, lR = 0, slR = 0, yeR = y;                                             \
+        while (y < yEnd) {                                                                           \
+            if (y >= yeL) {                                                                          \
+                if (!magEdgeNext(eL, R.p, R.n, R.n - 1, y, R.bot)) break;                            \
+                xL = eL.x; sxL = eL.sx; lL = eL.l; slL = eL.sl; yeL = eL.yEnd;                       \
+            }                                                                                        \
+            if (y >= yeR) {                                                                          \
+                if (!magEdgeNext(eR, R.p, R.n, 1, y, R.bot)) break;                                  \
+                xR = eR.x; sxR = eR.sx; lR = eR.l; slR = eR.sl; yeR = eR.yEnd;                       \
+            }                                                                                        \
+            int32 stop = yeL < yeR ? yeL : yeR;                                                      \
+            if (stop > yEnd) stop = yEnd;                                                            \
+            int32 rows = stop - y;                                                                   \
+            do {                                                                                     \
+                __VA_ARGS__                                                                          \
+                xL += sxL; xR += sxR;                                                                \
+                if (EDGE_LIGHT) { lL += slL; lR += slR; }                                            \
+                MAG_TRACE_Y();                                                                       \
+            } while (--rows > 0);                                                                    \
+            y = stop;                                                                                \
+        }                                                                                            \
+    }
+
+    // light along a span from the edges' lights, 15 bits, rounded towards zero so it stays between its
+    // ends; returns the light at xs and the step per pixel in dl (both << 1 for Maggie's 16 bits)
+    __attribute__((always_inline)) inline int32 magSpanLight(int32 xa, int32 xb, int32 xs, int32 lL, int32 lR, int32 &dlOut) {
+        int32 w = xb - xa;
+        int32 la = lL >> 16, d = (lR >> 16) - la, dl;
+        if (w < 1024) {
+            uint32 r = Mag::rcpi[w];
+            dl = d >= 0 ? int32((uint32(d) * r) >> 16) : -int32((uint32(-d) * r) >> 16);
+            if (dl > 16383) dl = 16383;
+            if (dl < -16383) dl = -16383;
+        } else
+            dl = d / w;
+        dlOut = dl << 1;
+        return (la + dl * (xs - xa)) << 1;
+    }
+
 #ifdef OL_EMU
     const void *magTracePrim = NULL;
+    #define MAG_TRACE_ROW() { if (&pr == magTracePrim && y >= Mag::pickY - 6 && y <= Mag::pickY + 6)                       \
+        printf("   row %ld: xa %ld xb %ld xs %ld len %ld clip %d..%d y %d..%d\n", (long)y, (long)xa, (long)xb, (long)xs, (long)len, \
+               int(clipX1), int(clipX2), int(swClipRect.y), int(swClipRect.w)); }
+    #define MAG_TRACE_Y() y++
+#else
+    #define MAG_TRACE_ROW() {}
+    #define MAG_TRACE_Y() {}
 #endif
-    void magDraw(const MagPrim &pr) {
-        MagVtx *const *p = pr.v;
-        const int n = pr.n;
-        int top = 0, bot = 0;
-        int32 xmin = p[0]->x, xmax = xmin;
-        for (int i = 1; i < n; i++) {
-            if (p[i]->y < p[top]->y) top = i;
-            if (p[i]->y > p[bot]->y) bot = i;
-            if (p[i]->x < xmin) xmin = p[i]->x;
-            if (p[i]->x > xmax) xmax = p[i]->x;
-        }
-        const int32 clipX1 = swClipRect.x, clipX2 = swClipRect.z;
-        int32 y = (p[top]->y + 7) >> 4, yEnd = (p[bot]->y + 7) >> 4;
-        if (y < swClipRect.y) y = swClipRect.y;
-        if (yEnd > swClipRect.w) yEnd = swClipRect.w;
-        if (y >= yEnd || xmax < (clipX1 << 4) || xmin > (clipX2 << 4)) return;
-        MAG_COUNT(2, 1);
 
-        const MagVtx *a = p[0], *b = p[1], *c = p[2];
-        MAG_PRIM_BEGIN(pr, a);
-
-    #ifdef _GAPI_MAGGIE
-        // Small polygons (a third of those drawn in LEVEL2: distant faces, model detail) take one texel, light
-        // and depth for the whole polygon, the mean of the corners, instead of planes over it: no
-        // gradient setup. The edges are walked as for any polygon, so exactly the same pixels are drawn
-        // and neighbours still meet without cracks.
-        if (xmax - xmin < MAG_SMALL * 16 && p[bot]->y - p[top]->y < MAG_SMALL * 16) {
-            int32 su = 0, sv = 0, sl = 0, sz = 0;
-            for (int i = 1; i < n; i++) { su += p[i]->u - a->u; sv += p[i]->v - a->v; sl += p[i]->l - a->l; sz += p[i]->z - a->z; }
-            int32 u, v, l, z;
-            if (n == 4) { u = a->u + (su >> 2); v = a->v + (sv >> 2); l = a->l + (sl >> 2); z = a->z + (sz >> 2); }
-            else        { u = a->u + su / 3;    v = a->v + sv / 3;    l = a->l + sl / 3;    z = a->z + sz / 3; }
-            l >>= 15;
-            const uint32 zs2 = uint32(z) << 1;
-            const bool zs = Mag::zSpan;
-            MagEdge L, R;
-            L.i = R.i = top;
-            L.yEnd = R.yEnd = y;
-            int32 lineOffset = y * Core::width;
-            bool first = true;
-            for (; y < yEnd; y++, lineOffset += Core::width) {
-                if (y >= L.yEnd && !magEdgeNext(L, p, n, n - 1, y, bot)) break;
-                if (y >= R.yEnd && !magEdgeNext(R, p, n, 1, y, bot)) break;
-                int32 xa = (L.x + 0x7FFF) >> 16, xb = (R.x + 0x7FFF) >> 16;
-                int32 xs = xa < clipX1 ? clipX1 : xa;
-                int32 xe = xb > clipX2 ? clipX2 : xb;
-                int32 len = xe - xs;
-                if (len > 0) {
-                    if (first) { first = false; Mag::polySteps(0, 0, 0); Mag::lightStep(0); }
-                    int32 offset = lineOffset + xs;
-                    Mag::spanSteps(swColor + offset, len, u, v, l, offset, zs2, zs);
-                }
-                L.x += L.sx; L.l += L.sl;
-                R.x += R.sx; R.l += R.sl;
-            }
-            return;
-        }
-    #endif
-
-        // gradients per pixel of a value known at a, b, c:  d/dx = (B - A) * kbx + (C - A) * kcx
-        float inv = 0.0625f / pr.area;
-        float kbx = float(c->y - a->y) * inv, kcx = float(a->y - b->y) * inv;
-        float kby = float(a->x - c->x) * inv, kcy = float(b->x - a->x) * inv;
-
-        // Integer rows: the value at the centre of the pixel next to vertex a, then
-        // row(y) + x * step, all wrapping 32-bit arithmetic.
-        const int32 X0 = (a->x + 7) >> 4, Y0 = (a->y + 7) >> 4;
-        const int32 fx = (X0 << 4) + 8 - a->x, fy = (Y0 << 4) + 8 - a->y;    // 0..15, 28.4
-        const int32 dyRow = y - Y0;
-
-        int32 dz = 0, dzY = 0;
-        uint32 zRow = 0;
-        if (Mag::zSpan) {
-            float fb = float(b->z - a->z), fc = float(c->z - a->z);
-            dz  = magInt(fb * kbx + fc * kcx);
-            dzY = magInt(fb * kby + fc * kcy);
-            zRow = uint32(a->z + (dz >> 4) * fx + (dzY >> 4) * fy) + uint32(dyRow) * uint32(dzY) - uint32(X0) * uint32(dz);
-        }
-        const int32 dz2 = dz << 1;
-
-        bool affine = true, rowConst = false;
-        int32 du = 0, dv = 0, duY = 0, dvY = 0;
-        uint32 uRow = 0, vRow = 0;
-        float qdx = 0.0f, qdy = 0.0f, udx = 0.0f, udy = 0.0f, vdx = 0.0f, vdy = 0.0f;
-        float qRow = 0.0f, uqRow = 0.0f, vqRow = 0.0f;  // perspective: 1/w, u/w, v/w at pixel (X0, y), near the polygon
-        float pieceK = 0.0f;                             // perspective: 4 MAG_PERSP_ERR / |d(1/w)/dx|
-        if (!magColored) {
-            if (Mag::perspective) {                      // 1/w varying noticeably over the polygon?
-                int32 qa = magBits(a->q), qb = qa;
-                for (int i = 1; i < n; i++) {
-                    int32 q = magBits(p[i]->q);
-                    if (q < qa) qa = q;
-                    if (q > qb) qb = q;
-                }
-                // Affine texturing puts a texel up to about size * (ratio - 1) / 4 pixels from its place
-                // inside a triangle, and four times that at the fourth corner of a quad (its plane comes
-                // from three): affine only when that stays under MAG_PERSP_ERR pixels.
-                MagFI lo, hi; lo.i = qa; hi.i = qb;
-                int32 ext = xmax - xmin, ey = p[bot]->y - p[top]->y;
-                if (ey > ext) ext = ey;
-                affine = magBits(lo.f * (n == 3 ? 64.0f * MAG_PERSP_ERR : 16.0f * MAG_PERSP_ERR) - (hi.f - lo.f) * float(ext)) >= 0;
-            }
-            if (affine) {
-                float fb = float(b->u - a->u), fc = float(c->u - a->u);
-                du  = magInt(fb * kbx + fc * kcx);
-                duY = magInt(fb * kby + fc * kcy);
-                uRow = uint32(a->u + (du >> 4) * fx + (duY >> 4) * fy) + uint32(dyRow) * uint32(duY) - uint32(X0) * uint32(du);
-                fb = float(b->v - a->v); fc = float(c->v - a->v);
-                dv  = magInt(fb * kbx + fc * kcx);
-                dvY = magInt(fb * kby + fc * kcy);
-                vRow = uint32(a->v + (dv >> 4) * fx + (dvY >> 4) * fy) + uint32(dyRow) * uint32(dvY) - uint32(X0) * uint32(dv);
-            } else {
-                float ax = float(a->x) * 0.0625f, ay = float(a->y) * 0.0625f;
-                float ox = float(X0) + 0.5f - ax, oy = float(y) + 0.5f - ay;
-                float fb = b->q - a->q, fc = c->q - a->q;
-                qdx = fb * kbx + fc * kcx;
-                qdy = fb * kby + fc * kcy;
-                qRow = a->q + ox * qdx + oy * qdy;
-                float ua = float(a->u) * a->q;
-                fb = float(b->u) * b->q - ua; fc = float(c->u) * c->q - ua;
-                udx = fb * kbx + fc * kcx;
-                udy = fb * kby + fc * kcy;
-                uqRow = ua + ox * udx + oy * udy;
-                float va = float(a->v) * a->q;
-                fb = float(b->v) * b->q - va; fc = float(c->v) * c->q - va;
-                vdx = fb * kbx + fc * kcx;
-                vdy = fb * kby + fc * kcy;
-                vqRow = va + ox * vdx + oy * vdy;
-                pieceK = (4.0f * MAG_PERSP_ERR) / (magBits(qdx) < 0 ? -qdx : qdx);     // inf when qdx = 0: one piece
-                // 1/w the same all along each line (floors and ceilings: the camera never rolls)? Then a
-                // line is one exact affine span: u = (u/w) / (1/w) and its step (du/w) / (1/w), one divide.
-                // Here: 1/w changes by less than 1/4096 across the polygon's width.
-                {
-                    int32 qlo = magBits(a->q);
-                    for (int i = 1; i < n; i++) if (magBits(p[i]->q) < qlo) qlo = magBits(p[i]->q);
-                    MagFI lo; lo.i = qlo;
-                    float aq = magBits(qdx) < 0 ? -qdx : qdx;
-                    rowConst = magBits(lo.f * (1.0f / 4096.0f) - aq * float(xmax - xmin) * 0.0625f) >= 0;
-                }
-            }
-        }
-
-        MagEdge L, R;
-        L.i = R.i = top;
-        L.yEnd = R.yEnd = y;
-        const int32 pitch = Core::width;
+#ifdef _GAPI_MAGGIE
+    // Small polygons (a third of those drawn in LEVEL2: distant faces, model detail) take one texel, light
+    // and depth for the whole polygon, the mean of the corners, instead of planes over it: no
+    // gradient setup. The edges are walked as for any polygon, so exactly the same pixels are drawn
+    // and neighbours still meet without cracks.
+    __attribute__((noinline)) void magDrawSmall(const MagRows &R) {
+        MagVtx *const *p = R.p;
+        const int n = R.n;
+        const MagVtx *a = p[0];
+        int32 su = 0, sv = 0, sl = 0, sz = 0;
+        for (int i = 1; i < n; i++) { su += p[i]->u - a->u; sv += p[i]->v - a->v; sl += p[i]->l - a->l; sz += p[i]->z - a->z; }
+        int32 u, v, l, z;
+        if (n == 4) { u = a->u + (su >> 2); v = a->v + (sv >> 2); l = a->l + (sl >> 2); z = a->z + (sz >> 2); }
+        else        { u = a->u + su / 3;    v = a->v + sv / 3;    l = a->l + sl / 3;    z = a->z + sz / 3; }
+        l >>= 15;
+        const uint32 zs2 = uint32(z) << 1;
+        const bool zs = Mag::zSpan;
+        const int32 clipX1 = swClipRect.x, clipX2 = swClipRect.z, pitch = Core::width;
+        int32 y = R.y, yEnd = R.yEnd;
         int32 lineOffset = y * pitch;
-
-        if (affine) {
-            // The common case, all integers. Texture and depth steps go to Maggie once; a triangle's
-            // light is a plane too (one step for the polygon), a quad's runs down its edges.
-            const bool zs = Mag::zSpan, lightPlane = n == 3;
-            int32 dlx = 0, dlY = 0;
-            uint32 lRow = 0;
-            bool first = true;               // the per-polygon registers go out with the first span: an earlier
-                                             // write would wait for the span in flight instead of working beside it
-            if (lightPlane) {
-                float fb = float(b->l - a->l), fc = float(c->l - a->l);
-                dlx = magInt(fb * kbx + fc * kcx);
-                dlY = magInt(fb * kby + fc * kcy);
-                lRow = uint32(a->l + (dlx >> 4) * fx + (dlY >> 4) * fy) + uint32(dyRow) * uint32(dlY) - uint32(X0) * uint32(dlx);
-            }
-            for (; y < yEnd; y++, lineOffset += pitch) {
-                if (y >= L.yEnd && !magEdgeNext(L, p, n, n - 1, y, bot)) break;
-                if (y >= R.yEnd && !magEdgeNext(R, p, n, 1, y, bot)) break;
-                int32 xa = (L.x + 0x7FFF) >> 16, xb = (R.x + 0x7FFF) >> 16;
-                int32 xs = xa < clipX1 ? clipX1 : xa;
-                int32 xe = xb > clipX2 ? clipX2 : xb;
-                int32 len = xe - xs;
-            #ifdef OL_EMU
-                if (&pr == magTracePrim && y >= Mag::pickY - 6 && y <= Mag::pickY + 6)
-                    printf("   row %ld: xa %ld xb %ld xs %ld len %ld clip %d..%d y %d..%d Li %d Ri %d\n", (long)y, (long)xa, (long)xb, (long)xs, (long)len,
-                           int(clipX1), int(clipX2), int(swClipRect.y), int(swClipRect.w), L.i, R.i);
-            #endif
-                if (len > 0) {
-                    int32 l;
-                    if (lightPlane) {
-                        l = int32((lRow + uint32(xs) * uint32(dlx)) >> 15);
-                        if (uint32(l) > 0xFFFF) l = l < 0 ? 0 : 0xFFFF;    // (a rounding step outside the range)
-                    } else {
-                        int32 w = xb - xa;
-                        int32 la = L.l >> 16, d = (R.l >> 16) - la, dl;
-                        if (w < 1024) {
-                            uint32 r = Mag::rcpi[w];
-                            dl = d >= 0 ? int32((uint32(d) * r) >> 16) : -int32((uint32(-d) * r) >> 16);
-                            if (dl > 16383) dl = 16383;
-                            if (dl < -16383) dl = -16383;
-                        } else
-                            dl = d / w;
-                        l = (la + dl * (xs - xa)) << 1;
-                        Mag::lightStep(dl << 1);
-                    }
-                    if (first) {
-                        first = false;
-                        Mag::polySteps(du, dv, dz2);
-                        if (lightPlane) Mag::lightStep(dlx / 32768);     // towards zero: a span's light stays between its ends
-                    }
-                    int32 offset = lineOffset + xs;
-                    MAG_COUNT(5, (dv < 0 ? -dv : dv) > (du < 0 ? -du : du) ? len : 0);     // pixels of spans that run along v
-                    Mag::spanSteps(swColor + offset, len, int32(uRow + uint32(xs) * uint32(du)), int32(vRow + uint32(xs) * uint32(dv)),
-                                   l, offset, (zRow + uint32(xs) * uint32(dz)) << 1, zs);
-                }
-                L.x += L.sx; L.l += L.sl;
-                R.x += R.sx; R.l += R.sl;
-                zRow += uint32(dzY);
-                uRow += uint32(duY); vRow += uint32(dvY);
-                lRow += uint32(dlY);
-            }
-            return;
-        }
-
-        for (; y < yEnd; y++, lineOffset += pitch) {
-            if (y >= L.yEnd && !magEdgeNext(L, p, n, n - 1, y, bot)) break;
-            if (y >= R.yEnd && !magEdgeNext(R, p, n, 1, y, bot)) break;
-            int32 xa = (L.x + 0x7FFF) >> 16, xb = (R.x + 0x7FFF) >> 16;
+        bool first = true;
+        const bool EDGE_LIGHT = false;
+        MAG_WALK({
+            int32 xa = (xL + 0x7FFF) >> 16, xb = (xR + 0x7FFF) >> 16;
             int32 xs = xa < clipX1 ? clipX1 : xa;
             int32 xe = xb > clipX2 ? clipX2 : xb;
             int32 len = xe - xs;
             if (len > 0) {
-                // light: 15 bits along the span, rounded towards zero so it stays between its ends
-                int32 w = xb - xa;
-                int32 la = L.l >> 16, d = (R.l >> 16) - la, dl;
-                if (w < 1024) {
-                    uint32 r = Mag::rcpi[w];
-                    dl = d >= 0 ? int32((uint32(d) * r) >> 16) : -int32((uint32(-d) * r) >> 16);
-                    if (dl > 16383) dl = 16383;
-                    if (dl < -16383) dl = -16383;
-                } else
-                    dl = d / w;
-                int32 l = (la + dl * (xs - xa)) << 1;
-                dl <<= 1;
+                if (first) { first = false; Mag::polySteps(0, 0, 0); Mag::lightStep(0); }
+                int32 offset = lineOffset + xs;
+                Mag::spanSteps(swColor + offset, len, u, v, l, offset, zs2, zs);
+            }
+            lineOffset += pitch;
+        })
+    }
+#endif
+
+    // gradients per pixel of a value known at a, b, c:  d/dx = (B - A) * kbx + (C - A) * kcx
+    struct MagGrad {
+        float kbx, kcx, kby, kcy;
+        int32 X0, Y0, fx, fy, dyRow;     // pixel next to vertex a, a's offset from its centre (28.4), first line - Y0
+        MagGrad(const MagVtx *a, const MagVtx *b, const MagVtx *c, float area, int32 y) {
+            float inv = 0.0625f / area;
+            kbx = float(c->y - a->y) * inv; kcx = float(a->y - b->y) * inv;
+            kby = float(a->x - c->x) * inv; kcy = float(b->x - a->x) * inv;
+            X0 = (a->x + 7) >> 4; Y0 = (a->y + 7) >> 4;
+            fx = (X0 << 4) + 8 - a->x; fy = (Y0 << 4) + 8 - a->y;
+            dyRow = y - Y0;
+        }
+        // Integer rows: the value at the centre of the pixel next to vertex a, then row(y) + x * step,
+        // all wrapping 32-bit arithmetic. Returns row(first line), steps per pixel and per line.
+        __attribute__((always_inline)) inline uint32 plane(int32 A, int32 B, int32 C, int32 &dx, int32 &dy) const {
+            float fb = float(B - A), fc = float(C - A);
+            dx = magInt(fb * kbx + fc * kcx);
+            dy = magInt(fb * kby + fc * kcy);
+            return uint32(A + (dx >> 4) * fx + (dy >> 4) * fy) + uint32(dyRow) * uint32(dy) - uint32(X0) * uint32(dx);
+        }
+    };
+
+    // The common case, all integers. Texture and depth steps go to Maggie once; a triangle's light is a
+    // plane too (one step for the polygon), a quad's runs down its edges.
+    template <bool LIGHT_PLANE, bool ZS>
+    __attribute__((noinline)) void magDrawAffine(const MagRows &R, const MagPrim &pr) {
+        MagVtx *const *p = R.p;
+        const MagVtx *a = p[0], *b = p[1], *c = p[2];
+        int32 y = R.y, yEnd = R.yEnd;
+        const MagGrad g(a, b, c, pr.area, y);
+        int32 dz = 0, dzY = 0, du = 0, dv = 0, duY = 0, dvY = 0, dlx = 0, dlY = 0;
+        uint32 zRow = 0, uRow = 0, vRow = 0, lRow = 0;
+        if (ZS) zRow = g.plane(a->z, b->z, c->z, dz, dzY);
+        if (!magColored) {
+            uRow = g.plane(a->u, b->u, c->u, du, duY);
+            vRow = g.plane(a->v, b->v, c->v, dv, dvY);
+        }
+        if (LIGHT_PLANE) lRow = g.plane(a->l, b->l, c->l, dlx, dlY);
+        const int32 clipX1 = swClipRect.x, clipX2 = swClipRect.z, pitch = Core::width;
+        int32 lineOffset = y * pitch;
+        bool first = true;               // the per-polygon registers go out with the first span: an earlier
+                                         // write would wait for the span in flight instead of working beside it
+        const bool EDGE_LIGHT = !LIGHT_PLANE;
+        MAG_WALK({
+            int32 xa = (xL + 0x7FFF) >> 16, xb = (xR + 0x7FFF) >> 16;
+            int32 xs = xa < clipX1 ? clipX1 : xa;
+            int32 xe = xb > clipX2 ? clipX2 : xb;
+            int32 len = xe - xs;
+            MAG_TRACE_ROW();
+            if (len > 0) {
+                int32 l;
+                if (LIGHT_PLANE) {
+                    l = int32((lRow + uint32(xs) * uint32(dlx)) >> 15);
+                    if (uint32(l) > 0xFFFF) l = l < 0 ? 0 : 0xFFFF;    // (a rounding step outside the range)
+                } else {
+                    int32 dl;
+                    l = magSpanLight(xa, xb, xs, lL, lR, dl);
+                    Mag::lightStep(dl);
+                }
+                if (first) {
+                    first = false;
+                    Mag::polySteps(du, dv, dz << 1);
+                    if (LIGHT_PLANE) Mag::lightStep(dlx / 32768);     // towards zero: a span's light stays between its ends
+                }
+                int32 offset = lineOffset + xs;
+                MAG_COUNT(5, (dv < 0 ? -dv : dv) > (du < 0 ? -du : du) ? len : 0);     // pixels of spans that run along v
+                Mag::spanSteps(swColor + offset, len, int32(uRow + uint32(xs) * uint32(du)), int32(vRow + uint32(xs) * uint32(dv)),
+                               l, offset, ZS ? (zRow + uint32(xs) * uint32(dz)) << 1 : 0, ZS);
+            }
+            lineOffset += pitch;
+            if (ZS) zRow += uint32(dzY);
+            uRow += uint32(duY); vRow += uint32(dvY);
+            if (LIGHT_PLANE) lRow += uint32(dlY);
+        })
+    }
+
+    // Perspective: per line 1/w, u/w, v/w at the line's first pixel, then affine pieces.
+    template <bool ROW_CONST>
+    __attribute__((noinline)) void magDrawPersp(const MagRows &R, const MagPrim &pr) {
+        MagVtx *const *p = R.p;
+        const int n = R.n;
+        const MagVtx *a = p[0], *b = p[1], *c = p[2];
+        int32 y = R.y, yEnd = R.yEnd;
+        const MagGrad g(a, b, c, pr.area, y);
+        const int32 X0 = g.X0;
+        int32 dz = 0, dzY = 0;
+        uint32 zRow = 0;
+        if (Mag::zSpan) zRow = g.plane(a->z, b->z, c->z, dz, dzY);
+        const int32 dz2 = dz << 1;
+
+        float ax = float(a->x) * 0.0625f, ay = float(a->y) * 0.0625f;
+        float ox = float(X0) + 0.5f - ax, oy = float(y) + 0.5f - ay;
+        float fb = b->q - a->q, fc = c->q - a->q;
+        const float qdx = fb * g.kbx + fc * g.kcx, qdy = fb * g.kby + fc * g.kcy;
+        float qRow = a->q + ox * qdx + oy * qdy;          // 1/w, u/w, v/w at pixel (X0, y), near the polygon
+        float ua = float(a->u) * a->q;
+        fb = float(b->u) * b->q - ua; fc = float(c->u) * c->q - ua;
+        const float udx = fb * g.kbx + fc * g.kcx, udy = fb * g.kby + fc * g.kcy;
+        float uqRow = ua + ox * udx + oy * udy;
+        float va = float(a->v) * a->q;
+        fb = float(b->v) * b->q - va; fc = float(c->v) * c->q - va;
+        const float vdx = fb * g.kbx + fc * g.kcx, vdy = fb * g.kby + fc * g.kcy;
+        float vqRow = va + ox * vdx + oy * vdy;
+        const float pieceK = ROW_CONST ? 0.0f : (4.0f * MAG_PERSP_ERR) / (magBits(qdx) < 0 ? -qdx : qdx);  // inf when qdx = 0: one piece
+        (void)n;
+
+        const int32 clipX1 = swClipRect.x, clipX2 = swClipRect.z, pitch = Core::width;
+        int32 lineOffset = y * pitch;
+        const bool EDGE_LIGHT = true;
+        MAG_WALK({
+            int32 xa = (xL + 0x7FFF) >> 16, xb = (xR + 0x7FFF) >> 16;
+            int32 xs = xa < clipX1 ? clipX1 : xa;
+            int32 xe = xb > clipX2 ? clipX2 : xb;
+            int32 len = xe - xs;
+            if (len > 0) {
+                int32 dl;
+                int32 l = magSpanLight(xa, xb, xs, lL, lR, dl);
                 int32 offset = lineOffset + xs;
                 uint32 z = (zRow + uint32(xs) * uint32(dz)) << 1;
-                if (affine) {
-                    Mag::span(swColor + offset, len, int32(uRow + uint32(xs) * uint32(du)), int32(vRow + uint32(xs) * uint32(dv)),
-                              du, dv, l, dl, offset, z, dz2);
-                } else if (rowConst) {
-                    float fxs = float(xs - X0);
+                float fxs = float(xs - X0);
+                if (ROW_CONST) {
+                    // 1/w the same all along the line (floors and ceilings: the camera never rolls): one
+                    // exact affine span, u = (u/w) / (1/w) and its step (du/w) / (1/w), one divide
                     float r = 1.0f / (qRow + fxs * qdx);
                     float u0 = uqRow + fxs * udx, v0 = vqRow + fxs * vdx;
                     Mag::span(swColor + offset, len, magInt(u0 * r), magInt(v0 * r), magInt(udx * r), magInt(vdx * r),
@@ -344,7 +334,6 @@
                     // changes along the span. Only pixel centres inside the polygon are evaluated
                     // (1/w > 0 there): the last piece ends on the last pixel.
                     // Both ends first: their divides overlap, and the last piece's end is the span's end.
-                    float fxs = float(xs - X0);
                     float q0 = qRow + fxs * qdx, u0 = uqRow + fxs * udx, v0 = vqRow + fxs * vdx;
                     int32 m = len - 1;
                     float fm = float(m);
@@ -364,16 +353,18 @@
                         if (sh > 9) sh = 9;
                     }
                     float uer = ue * re, ver = ve * re;
-                    const int32 S = 1 << sh;
-                    const float fS = float(S), qS = qdx * fS, uS = udx * fS, vS = vdx * fS;
                     int32 iua = magInt(u0 * r), iva = magInt(v0 * r);
-                    while (len > S) {                // whole pieces
-                        r = 1.0f / (q0 + qS);
-                        u0 += uS; v0 += vS; q0 += qS;
-                        int32 iub = magInt(u0 * r), ivb = magInt(v0 * r);
-                        Mag::span(swColor + offset, S, iua, iva, (iub - iua) >> sh, (ivb - iva) >> sh, l, dl, offset, z, dz2);
-                        l += dl << sh; z += uint32(dz2) << sh; offset += S; len -= S;
-                        iua = iub; iva = ivb;
+                    if (len > (1 << sh)) {
+                        const int32 S = 1 << sh;
+                        const float fS = float(S), qS = qdx * fS, uS = udx * fS, vS = vdx * fS;
+                        do {                         // whole pieces
+                            r = 1.0f / (q0 + qS);
+                            u0 += uS; v0 += vS; q0 += qS;
+                            int32 iub = magInt(u0 * r), ivb = magInt(v0 * r);
+                            Mag::span(swColor + offset, S, iua, iva, (iub - iua) >> sh, (ivb - iva) >> sh, l, dl, offset, z, dz2);
+                            l += dl << sh; z += uint32(dz2) << sh; offset += S; len -= S;
+                            iua = iub; iva = ivb;
+                        } while (len > S);
                     }
                     {                                // the last piece: len pixels, its last centre len - 1 away
                         int32 sdu = 0, sdv = 0;
@@ -387,12 +378,65 @@
                     }
                 }
             }
-            L.x += L.sx; L.l += L.sl;
-            R.x += R.sx; R.l += R.sl;
+            lineOffset += pitch;
             zRow += uint32(dzY);
-            if (affine) { uRow += uint32(duY); vRow += uint32(dvY); }
-            else { qRow += qdy; uqRow += udy; vqRow += vdy; }
+            qRow += qdy; uqRow += udy; vqRow += vdy;
+        })
+    }
+
+    void magDraw(const MagPrim &pr) {
+        MagRows R;
+        MagVtx *const *p = pr.v;
+        const int n = pr.n;
+        int top = 0, bot = 0;
+        int32 xmin = p[0]->x, xmax = xmin;
+        for (int i = 1; i < n; i++) {
+            if (p[i]->y < p[top]->y) top = i;
+            if (p[i]->y > p[bot]->y) bot = i;
+            if (p[i]->x < xmin) xmin = p[i]->x;
+            if (p[i]->x > xmax) xmax = p[i]->x;
         }
+        int32 y = (p[top]->y + 7) >> 4, yEnd = (p[bot]->y + 7) >> 4;
+        if (y < swClipRect.y) y = swClipRect.y;
+        if (yEnd > swClipRect.w) yEnd = swClipRect.w;
+        if (y >= yEnd || xmax < (swClipRect.x << 4) || xmin > (swClipRect.z << 4)) return;
+        MAG_COUNT(2, 1);
+        R.p = p; R.n = n; R.top = top; R.bot = bot; R.y = y; R.yEnd = yEnd; R.xmin = xmin; R.xmax = xmax;
+
+        MAG_PRIM_BEGIN(pr, p[0]);
+
+    #ifdef _GAPI_MAGGIE
+        if (xmax - xmin < MAG_SMALL * 16 && p[bot]->y - p[top]->y < MAG_SMALL * 16) { magDrawSmall(R); return; }
+    #endif
+
+        if (!magColored && Mag::perspective) {           // 1/w varying noticeably over the polygon?
+            int32 qa = magBits(p[0]->q), qb = qa;
+            for (int i = 1; i < n; i++) {
+                int32 q = magBits(p[i]->q);
+                if (q < qa) qa = q;
+                if (q > qb) qb = q;
+            }
+            // Affine texturing puts a texel up to about size * (ratio - 1) / 4 pixels from its place
+            // inside a triangle, and four times that at the fourth corner of a quad (its plane comes
+            // from three): affine only when that stays under MAG_PERSP_ERR pixels.
+            MagFI lo, hi; lo.i = qa; hi.i = qb;
+            int32 ext = xmax - xmin, ey = p[bot]->y - p[top]->y;
+            if (ey > ext) ext = ey;
+            if (magBits(lo.f * (n == 3 ? 64.0f * MAG_PERSP_ERR : 16.0f * MAG_PERSP_ERR) - (hi.f - lo.f) * float(ext)) < 0) {
+                // 1/w the same all along each line? Here: it changes by less than 1/4096 across the
+                // polygon's width (d(1/w)/dx from the plane, as the walker computes it)
+                const MagVtx *a = p[0], *b = p[1], *c = p[2];
+                float inv = 0.0625f / pr.area;
+                float qdx = (b->q - a->q) * (float(c->y - a->y) * inv) + (c->q - a->q) * (float(a->y - b->y) * inv);
+                float aq = magBits(qdx) < 0 ? -qdx : qdx;
+                if (magBits(lo.f * (1.0f / 4096.0f) - aq * float(xmax - xmin) * 0.0625f) >= 0) magDrawPersp<true>(R, pr);
+                else magDrawPersp<false>(R, pr);
+                return;
+            }
+        }
+
+        if (n == 3) { if (Mag::zSpan) magDrawAffine<true, true>(R, pr);  else magDrawAffine<true, false>(R, pr); }
+        else        { if (Mag::zSpan) magDrawAffine<false, true>(R, pr); else magDrawAffine<false, false>(R, pr); }
     }
 
 #ifdef _GAPI_SW
