@@ -409,8 +409,8 @@ struct Video {
 
         bool decode124(uint8 *data, Color32 *pixels) {
             uint32 flags, size;
-            memcpy(&flags, data + 0, 4);
-            memcpy(&size,  data + 4, 4);
+            flags = data[0] | (data[1] << 8) | (data[2] << 16) | (uint32(data[3]) << 24);  // little-endian in the file
+            size  = data[4] | (data[5] << 8) | (data[6] << 16) | (uint32(data[7]) << 24);
             data += 8;
 
             curVideoPos += size;

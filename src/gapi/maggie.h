@@ -1288,6 +1288,37 @@ namespace GAPI {
         memcpy(swColor, swBackground, W * H * sizeof(ColorSW));
     }
 
+    // A movie frame (RGBA, origWidth x origHeight, stretched sy times vertically) scaled into the
+    // frame buffer with black bars, nearest pixel: one colour conversion per source pixel, rows that
+    // repeat are copied.
+    void drawVideoFrame(Texture *tex, float sy) {
+        if (!tex || !tex->memory || tex->origWidth <= 0 || tex->origHeight <= 0) return;
+        int W = Core::width, H = Core::height;
+        int sw = tex->origWidth, sh = tex->origHeight;
+        int ah = int(sh * sy + 0.5f);    // display height in source pixels
+        int dw = W, dh = W * ah / sw;
+        if (dh > H) { dh = H; dw = H * sw / ah; }
+        int ox = (W - dw) / 2, oy = (H - dh) / 2;
+        static ColorSW line[1024];
+        static int     xmap[2048];
+        for (int x = 0; x < dw && x < 2048; x++) xmap[x] = x * sw / dw;
+        Mag::sync();
+        if (oy > 0) memset(swColor, 0, oy * W * sizeof(ColorSW));
+        if (oy + dh < H) memset(swColor + (oy + dh) * W, 0, (H - oy - dh) * W * sizeof(ColorSW));
+        int prev = -1;
+        for (int y = 0; y < dh; y++) {
+            ColorSW *dst = swColor + (oy + y) * W;
+            int sy0 = y * sh / dh;
+            if (sy0 == prev) { memcpy(dst, dst - W, W * sizeof(ColorSW)); continue; }
+            prev = sy0;
+            const uint8 *src = tex->memory + sy0 * tex->width * 4;
+            for (int x = 0; x < sw && x < 1024; x++) line[x] = CONV_COLOR(src[x * 4], src[x * 4 + 1], src[x * 4 + 2]);
+            if (ox > 0) { memset(dst, 0, ox * sizeof(ColorSW)); memset(dst + ox + dw, 0, (W - ox - dw) * sizeof(ColorSW)); }
+            ColorSW *d = dst + ox;
+            for (int x = 0; x < dw; x++) d[x] = line[xmap[x]];
+        }
+    }
+
     // The inventory's backdrop: the game frame it opened over, blurred and greyed as the engine's
     // shaders do it (Inventory::prepareBackground). Taken from the frame buffer on the CPU, which reads
     // Maggie's output correctly after Mag::sync() (vampire-v4-dev skill).

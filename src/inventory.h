@@ -1998,6 +1998,14 @@ struct Inventory {
 
             Core::resetLights();
 
+        #ifdef _GAPI_MAGGIE
+            // the newest frame scaled straight into the frame buffer (no texture re-encode, no crossfade)
+            Core::validateRenderState();
+            GAPI::drawVideoFrame(video->frameTex[1], sy * ch);
+            Core::setDepthTest(true);
+            return;
+        #endif
+
             background[0] = video->frameTex[0];
             renderTitleBG(1.0f, sy, 255, 1.0f, ch);
 
