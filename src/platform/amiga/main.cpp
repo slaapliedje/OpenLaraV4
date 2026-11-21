@@ -552,6 +552,12 @@ __attribute__((noinline)) static int olMain()
     if (GetVar((STRPTR)"OLNONCULL", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::normalCull = false;    // ENV:OLNONCULL
     if (GetVar((STRPTR)"OLNOCELLS", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::roomCells = false;     // ENV:OLNOCELLS
     if (GetVar((STRPTR)"OLPICK", (STRPTR)envTmp, sizeof(envTmp), 0) > 0) sscanf(envTmp, "%d,%d", &Mag::pickX, &Mag::pickY);
+    // the texture error bound in pixels: the same size on screen at every resolution (1 px per 320
+    // columns, so 2 at 640x480); ENV:OLPERSPERR overrides
+    Mag::perspErr = SCREEN_WIDTH >= 640 ? float(SCREEN_WIDTH) / 320.0f : 1.0f;
+#ifdef _GAPI_MAGGIE
+    if (GetVar((STRPTR)"OLDRAWDIST", (STRPTR)envTmp, sizeof(envTmp), 0) > 0) { int d = atoi(envTmp); if (d >= 8 && d <= 45) GAPI::magDrawDist = float(d) * 1024.0f; }
+#endif
     if (GetVar((STRPTR)"OLPERSPERR", (STRPTR)envTmp, sizeof(envTmp), 0) > 0) { int e = atoi(envTmp); if (e >= 1 && e <= 8) Mag::perspErr = float(e); }
     if (GetVar((STRPTR)"OLNOALPHA", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::cpuAlpha = false;   // ENV:OLNOALPHA
     if (GetVar((STRPTR)"OLNOMIP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::mipmaps = false;         // ENV:OLNOMIP

@@ -413,6 +413,10 @@ namespace GAPI {
     // 68080 has no exponent instruction (FETOX would trap into the 060 package).
     #define MAG_FOG_SHIFT 7              // table step: 128 units
     #define MAG_FOG_SIZE  360            // up to 45K units (SW_MAX_DIST)
+    // Draw distance (ENV:OLDRAWDIST, sectors of 1024 units): the engine's camera reaches 45K; the
+    // original game stopped at about 20K with a fade to black. Below 45K the fog table also fades to
+    // black over the last 4K, so the limit never shows as an edge.
+    float  magDrawDist = 20.0f * 1024.0f;   // the original game's; 45 sectors (the PC port's) costs ~11 ms in big levels
     #define MAG_FOG_TABS  4              // kept tables: a frame switches between level, water and no fog
     int32  magFogTabs[MAG_FOG_TABS][MAG_FOG_SIZE + 1];
     float  magFogTabD[MAG_FOG_TABS] = { -1.0f, -1.0f, -1.0f, -1.0f }, magFogTabC[MAG_FOG_TABS];
@@ -442,8 +446,11 @@ namespace GAPI {
         magFogTabD[t] = d; magFogTabC[t] = c;
         magFogTab = magFogTabs[t];
         for (int i = 0; i <= MAG_FOG_SIZE; i++) {
-            float f = expf(-float(i << MAG_FOG_SHIFT) * d);
-            magFogTab[i] = int32(256.0f * (f + (1.0f - f) * c) + 0.5f);
+            float dist = float(i << MAG_FOG_SHIFT);
+            float f = expf(-dist * d);
+            float edge = magDrawDist < SW_MAX_DIST ? (magDrawDist - dist) * (1.0f / 4096.0f) : 1.0f;
+            edge = edge < 0.0f ? 0.0f : (edge > 1.0f ? 1.0f : edge);
+            magFogTab[i] = int32(256.0f * edge * (f + (1.0f - f) * c) + 0.5f);
         }
     }
 
@@ -740,7 +747,7 @@ namespace GAPI {
                     magPlane[5][k] = -r3[k];
                 }
                 magPlane[4][3] -= persp ? SW_NEAR : 0.0f;
-                magPlane[5][3] += SW_MAX_DIST;
+                magPlane[5][3] += magDrawDist;
                 for (int j = 0; j < 6; j++)
                     for (int k = 0; k < 3; k++) magPlane[j][4 + k] = fabsf(magPlane[j][k]);
             }
@@ -777,7 +784,7 @@ namespace GAPI {
         // orthographic projections (UI, 2D) have w = 1 everywhere: only perspective ones get the near plane
         const bool ortho = Core::mProj.e33 == 1.0f;
         const float nearW = ortho ? 0.0f : SW_NEAR;
-        const int32 nearBits = magBits(nearW), farBits = magBits(SW_MAX_DIST);
+        const int32 nearBits = magBits(nearW), farBits = magBits(magDrawDist);
         // which way round is the front: the engine's default (cmFront) is clockwise on this screen
         const bool cullNone = cullMode == 0, flip = cullMode == RS_CULL_BACK;
 
