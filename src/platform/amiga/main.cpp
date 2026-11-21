@@ -287,19 +287,6 @@ static void saveFrame(const char *prefix, int frame, const uint16 *pixels);
 
 static void pollInput()
 {
-    // The picture goes to SAGA directly, so it stays on show even when Intuition has brought
-    // another screen to the front (a mouse click, Amiga-M): keys then go to that screen's window
-    // (an AmigaShell behind the game). Take the front and the focus back while the game runs.
-    if (window && ((struct IntuitionBase*)IntuitionBase)->ActiveWindow != window) {
-        static int lastTry = -1000;
-        int now = osGetTimeMS();
-        if (now - lastTry > 500) {
-            lastTry = now;
-            ScreenToFront(screen);
-            ActivateWindow(window);
-        }
-    }
-
     struct IntuiMessage* msg;
     while (window && (msg = (struct IntuiMessage*)GetMsg(window->UserPort))) {
         if (msg->Class == IDCMP_RAWKEY) {
@@ -621,8 +608,25 @@ __attribute__((noinline)) static int olMain()
         sprintf(name, "%s.txt", outPrefix);
         out = fopen(name, "w");
     }
+    bool inBackground = false;
     while (!quit) {
         if (!headlessFrames) pollInput();
+        // Behave like an Amiga screen: the picture goes to SAGA directly, so when another screen
+        // comes to the front (Amiga-M, a click on Workbench) stop drawing and leave the display to it
+        // (keys go to its windows then); when ours is back in front, take the keyboard again.
+        if (!headlessFrames && screen && ((struct IntuitionBase*)IntuitionBase)->FirstScreen != screen) {
+            if (!inBackground) { inBackground = true; printf("game screen in the background: paused\n"); }
+            BPTR l = Lock((STRPTR)"RAM:olquit", ACCESS_READ);
+            if (l) { UnLock(l); DeleteFile((STRPTR)"RAM:olquit"); break; }
+            Delay(5);
+            continue;
+        }
+        if (inBackground) {
+            inBackground = false;
+            printf("game screen in front again\n");
+            if (window) ActivateWindow(window);
+            Core::resetTime();           // no jump in game time for the pause
+        }
         bool shotNow = false;
         while (scriptPos < scriptCount && script[scriptPos].frame <= loopFrame) {
             ScriptEvent &e = script[scriptPos++];
