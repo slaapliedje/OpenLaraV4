@@ -16,6 +16,7 @@
 #include <proto/graphics.h>
 #include <proto/lowlevel.h>
 #include <intuition/intuition.h>
+#include <intuition/intuitionbase.h>
 #include <exec/semaphores.h>
 #include <dos/dostags.h>
 #include <cybergraphx/cybergraphics.h>
@@ -286,6 +287,19 @@ static void saveFrame(const char *prefix, int frame, const uint16 *pixels);
 
 static void pollInput()
 {
+    // The picture goes to SAGA directly, so it stays on show even when Intuition has brought
+    // another screen to the front (a mouse click, Amiga-M): keys then go to that screen's window
+    // (an AmigaShell behind the game). Take the front and the focus back while the game runs.
+    if (window && ((struct IntuitionBase*)IntuitionBase)->ActiveWindow != window) {
+        static int lastTry = -1000;
+        int now = osGetTimeMS();
+        if (now - lastTry > 500) {
+            lastTry = now;
+            ScreenToFront(screen);
+            ActivateWindow(window);
+        }
+    }
+
     struct IntuiMessage* msg;
     while (window && (msg = (struct IntuiMessage*)GetMsg(window->UserPort))) {
         if (msg->Class == IDCMP_RAWKEY) {
