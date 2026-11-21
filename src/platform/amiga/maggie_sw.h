@@ -341,10 +341,35 @@ namespace Mag {
         zWidth = width; zHeight = height;
     }
 
+    // Fill n longs with v: 16 move.l (a0)+ a turn, ~700 MB/s on the V4 against ~500 for libnix memset
+    // and ~360 for the 8-store C loop (vampire-v4-dev skill, cpu.md)
+    inline void fill32(void *dst, uint32 v, uint32 n) {
+    #if defined(__mc68000__) && !defined(OL_EMU)
+        uint32 *p = (uint32*)dst;
+        uint32 blocks = n >> 4, rest = n & 15;
+        if (blocks) {
+            register uint32 *a0 __asm__("a0") = p;
+            register uint32 d0 __asm__("d0") = v;
+            register uint32 d1 __asm__("d1") = blocks;
+            __asm__ __volatile__(
+                "1: move.l %1,(%0)+\n move.l %1,(%0)+\n move.l %1,(%0)+\n move.l %1,(%0)+\n"
+                "   move.l %1,(%0)+\n move.l %1,(%0)+\n move.l %1,(%0)+\n move.l %1,(%0)+\n"
+                "   move.l %1,(%0)+\n move.l %1,(%0)+\n move.l %1,(%0)+\n move.l %1,(%0)+\n"
+                "   move.l %1,(%0)+\n move.l %1,(%0)+\n move.l %1,(%0)+\n move.l %1,(%0)+\n"
+                "   subq.l #1,%2\n bne.s 1b\n"
+                : "+a"(a0), "+d"(d0), "+d"(d1) : : "cc", "memory");
+            p = a0;
+        }
+        while (rest--) *p++ = v;
+    #else
+        uint32 *p = (uint32*)dst;
+        while (n--) *p++ = v;
+    #endif
+    }
+
     void clearDepth() {                  // to far; the 080's data cache writes through
         if (!zbuf) return;
-        uint32 *p = (uint32*)zbuf, *e = p + zWidth * zHeight / 2;
-        while (p < e) { p[0] = p[1] = p[2] = p[3] = p[4] = p[5] = p[6] = p[7] = 0xFFFFFFFF; p += 8; }
+        fill32(zbuf, 0xFFFFFFFF, zWidth * zHeight / 2);
         zClean = true;
     }
 

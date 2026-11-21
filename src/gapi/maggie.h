@@ -346,7 +346,7 @@ namespace GAPI {
     void clear(bool color, bool depth) {
         if (color) {
             Mag::sync();                 // a span still being drawn would land on the cleared frame
-            memset(swColor, 0, Core::width * Core::height * sizeof(ColorSW));
+            Mag::fill32(swColor, 0, Core::width * Core::height * sizeof(ColorSW) / 4);
         }
         if (depth && Mag::zOn && !Mag::zClean) {
             Mag::sync();
