@@ -1305,6 +1305,21 @@ namespace GAPI {
         Mag::sync();
         if (oy > 0) memset(swColor, 0, oy * W * sizeof(ColorSW));
         if (oy + dh < H) memset(swColor + (oy + dh) * W, 0, (H - oy - dh) * W * sizeof(ColorSW));
+        if (dw == sw * 2 && !(ox & 1) && sw <= 1024) {   // exactly twice as wide: one long store per source pixel
+            static uint32 line2[1024];
+            int prev2 = -1;
+            for (int y = 0; y < dh; y++) {
+                ColorSW *dst = swColor + (oy + y) * W;
+                int sy0 = y * sh / dh;
+                if (sy0 == prev2) { memcpy(dst, dst - W, W * sizeof(ColorSW)); continue; }
+                prev2 = sy0;
+                const uint8 *src = tex->memory + sy0 * tex->width * 4;
+                for (int x = 0; x < sw; x++) { uint32 c = CONV_COLOR(src[x * 4], src[x * 4 + 1], src[x * 4 + 2]); line2[x] = c | (c << 16); }
+                if (ox > 0) { memset(dst, 0, ox * sizeof(ColorSW)); memset(dst + ox + dw, 0, (W - ox - dw) * sizeof(ColorSW)); }
+                memcpy(dst + ox, line2, sw * 4);
+            }
+            return;
+        }
         int prev = -1;
         for (int y = 0; y < dh; y++) {
             ColorSW *dst = swColor + (oy + y) * W;

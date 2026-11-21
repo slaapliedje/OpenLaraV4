@@ -2639,23 +2639,20 @@ struct BitStream {
         return bit;
     }
 
-    uint32 read(int count) {
-        uint32 bits = 0, mask = 1;
-
-        if (index == 0) {
-            if (count > 7) {
-                count -= 8;
-                mask <<= 8;
-                bits = *data++;
-            }
+    // LSB-first, up to 24 bits: whole bytes at a time (same result as count readBit() calls)
+#ifdef __GNUC__
+    __attribute__((always_inline))
+#endif
+    inline uint32 read(int count) {
+        uint32 buf = value;
+        int    n   = index;
+        while (n < count) {
+            buf |= uint32(*data++) << n;
+            n += 8;
         }
-
-        while (count--) {
-            if (readBit())
-                bits += mask;
-            mask <<= 1;
-        }
-
+        uint32 bits = buf & ((1U << count) - 1);
+        value = uint16(buf >> count);
+        index = uint16(n - count);
         return bits;
     }
 
