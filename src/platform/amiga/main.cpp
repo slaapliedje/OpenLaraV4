@@ -219,6 +219,27 @@ static InputKey rawToKey(UWORD code)
         case 0x40: return ikSpace;  case 0x44: return ikEnter;
         case 0x45: return ikEscape; case 0x5F: return ikTab;
         case 0x46: return ikDel;    case 0x41: return ikBack;
+        case 0x43: return ikEnter;  // numeric pad Enter
+        default:   break;
+    }
+    // letters, digits, numeric pad and punctuation (US positions; the engine binds Look C, Duck Z,
+    // Dash X, Roll A by default)
+    static const char  qrow[] = "QWERTYUIOP", arow[] = "ASDFGHJKL", zrow[] = "ZXCVBNM";
+    if (code >= 0x10 && code < 0x10 + 10) return InputKey(ikA + qrow[code - 0x10] - 'A');
+    if (code >= 0x20 && code < 0x20 + 9)  return InputKey(ikA + arow[code - 0x20] - 'A');
+    if (code >= 0x31 && code < 0x31 + 7)  return InputKey(ikA + zrow[code - 0x31] - 'A');
+    if (code >= 0x01 && code <= 0x09)     return InputKey(ik1 + code - 0x01);
+    switch (code) {
+        case 0x0A: return ik0;
+        case 0x0F: return ikN0;  case 0x1D: return ikN1;  case 0x1E: return ikN2;  case 0x1F: return ikN3;
+        case 0x2D: return ikN4;  case 0x2E: return ikN5;  case 0x2F: return ikN6;
+        case 0x3D: return ikN7;  case 0x3E: return ikN8;  case 0x3F: return ikN9;
+        case 0x3C: return ikNDot; case 0x4A: return ikNSub; case 0x5E: return ikNAdd;
+        case 0x5D: return ikNMul; case 0x5C: return ikNDiv;
+        case 0x0B: return ikMinus; case 0x0C: return ikPlus;  case 0x0D: return ikBSlash;
+        case 0x1A: return ikLSB;   case 0x1B: return ikRSB;   case 0x29: return ikColon;
+        case 0x2A: return ikApos;  case 0x38: return ikComma; case 0x39: return ikDot;
+        case 0x3A: return ikSlash; case 0x00: return ikTilda;
         default:   return ikNone;
     }
 }
