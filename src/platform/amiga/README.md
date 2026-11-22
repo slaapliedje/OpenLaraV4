@@ -43,6 +43,10 @@ Copy `OpenLaraHW` next to the game's `DATA/` folder (and optionally `FMV/` and `
 16-bit screen mode of the size wanted with `SetEnv OLRES 640x480` (default 320x240), then run
 `OpenLaraHW`, or `OpenLaraHW DATA/LEVEL2.PHD` to start a level. F10 quits.
 
+From Workbench: `launcher/launch.c` (`m68k-amigaos-gcc -O2 -noixemul -s`) copied next to the game as
+`OpenLara 4-3` and `OpenLara 16-9`, each with a tool icon, starts it at 640x480 or 640x360 (by the
+"16" in its name) without touching ENV:OLRES.
+
 Environment variables (ENV: or local): `OLRES`, `OLDRAWDIST` (sectors, 8-45), `OLPERSPERR` (texture
 error bound in pixels), `OLNOARNE` (mix the effects in software), `OLNOSOUND`, `OLREVERB`,
 `OLAHIUNIT`, and A/B switches `OLZPROJ` (z/w depth), `OLNOZ`, `OLNOPERSP`, `OLNOCELLS`, `OLNONCULL`, `OLNOFACES`,
