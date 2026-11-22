@@ -236,7 +236,7 @@ namespace Sound {
         virtual int decode(Frame *frames, int count) { return 0; }
         virtual void replay() { stream->seek(offset - stream->pos); }
 
-        int resample(Sound::Frame *frames, Sound::Frame &frame) {
+        __attribute__((always_inline)) inline int resample(Sound::Frame *frames, Sound::Frame &frame) {
             if (freq == 44100) {
                 frames[0] = frame;
                 return 1;
@@ -284,6 +284,32 @@ namespace Sound {
 
         virtual int decode(Frame *frames, int count) {
             if (stream->pos - offset >= size) return 0;
+            // A sample in memory (the level's sounds): the whole request in one call, straight from the
+            // bytes. The per-sample path below costs a virtual call, a stream read and a byte swap for
+            // every source sample. Same samples, same resampling, same end position.
+            if (stream->data && (bits == 16 || bits == 8 || bits == -8) && channels >= 1 && channels <= 2) {
+                const uint8 *src = (const uint8*)stream->data;
+                int p = stream->pos, done = 0;
+                const int end = offset + size, bytes = (bits == 16 ? 2 : 1) * channels;
+                while (done < count && p - offset < size && p + bytes <= stream->size) {
+                    Frame frame;
+                    if (bits == 16) {
+                        frame.L = int16(src[p] | (src[p + 1] << 8));
+                        frame.R = channels == 2 ? int16(src[p + 2] | (src[p + 3] << 8)) : frame.L;
+                    } else if (bits == 8) {
+                        frame.L = int16(src[p] * 257 - 32768);
+                        frame.R = channels == 2 ? int16(src[p + 1] * 257 - 32768) : frame.L;
+                    } else {
+                        frame.L = int16((int8(src[p]) + 128) * 257 - 32768);
+                        frame.R = channels == 2 ? int16((int8(src[p + 1]) + 128) * 257 - 32768) : frame.L;
+                    }
+                    p += bytes;
+                    done += resample(frames + done, frame);
+                }
+                (void)end;
+                stream->pos = p;
+                return done;
+            }
 
             // ! in the original game series only 11025 and 22050 Hz single channel samples were used ! //
 
@@ -831,6 +857,26 @@ namespace Sound {
 
         virtual int decode(Frame *frames, int count) {
             PROFILE_CPU_TIMING(stats.ogg);
+            if (freq == 22050 || freq == 11025) {
+                // lower-rate music (half the decoding per second of sound): decoded into the back of the
+                // buffer, then stretched to 44.1 kHz in place, front to back, as the PCM sounds are
+                const int k = 44100 / freq;
+                int n = count / k;
+                if (n < 1) n = 1;
+                Frame *src = frames + count - n;
+                int got = 0;
+                while (got < n) {
+                    int res = stb_vorbis_get_samples_short_interleaved(ogg, 2, (short*)(src + got), (n - got) * 2);
+                    if (!res) break;
+                    got += res;
+                }
+                int out = 0;
+                for (int j = 0; j < got && out + k <= count; j++) {
+                    Frame f = src[j];
+                    out += resample(frames + out, f);
+                }
+                return out;
+            }
             int i = 0;
             while (i < count) {
                 int res = stb_vorbis_get_samples_short_interleaved(ogg, channels, (short*)frames + i, (count - i) * 2);
@@ -1050,6 +1096,17 @@ namespace Sound {
             float v = volume * m;
             vec2 pan = getPan();
             vec2 vol = pan * VOL_CONV(v);
+            if (volumeDelta == 0.0f) {
+                // constant volume (nearly always): 16.16 fixed point, truncated towards zero as the float
+                // version's int() is; the float loop below costs a float compare per sample and an
+                // int-float-int round trip per channel (68080: about 25 cycles a frame)
+                const int32 vl = int32(vol.x * 65536.0f), vr = int32(vol.y * 65536.0f);
+                for (int j = 0; j < i; j++) {
+                    int32 pl = int32(frames[j].L) * vl, pr = int32(frames[j].R) * vr;
+                    frames[j].L = int16((pl + ((pl >> 31) & 0xFFFF)) >> 16);
+                    frames[j].R = int16((pr + ((pr >> 31) & 0xFFFF)) >> 16);
+                }
+            } else
             for (int j = 0; j < i; j++)
             {
                 if (volumeDelta != 0.0f) // increase / decrease channel volume
@@ -1178,13 +1235,15 @@ namespace Sound {
                 }
 
             } else { // has pitch (interpolate values for smooth wave)
-                float t = 0.0f;
+                // position in 16.16 fixed point: no float-to-int conversions per output frame
+                uint32 t = 0;
+                const uint32 dt = uint32(channels[i]->pitch * 65536.0f + 0.5f);
 
-                for (int j = 0; j < count; j++, t += channels[i]->pitch)
+                for (int j = 0; j < count; j++, t += dt)
                 {
-                    int idxA = int(t);
+                    int idxA = int(t >> 16);
                     int idxB = (j == (count - 1)) ? idxA : (idxA + 1);
-                    int st = int((t - idxA) * DSP_SCALE);
+                    int st = int((t >> (16 - DSP_SCALE_BIT)) & (DSP_SCALE - 1));
                     Frame &a = buffer[idxA];
                     Frame &b = buffer[idxB];
 

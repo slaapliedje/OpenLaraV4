@@ -885,6 +885,8 @@ namespace GAPI {
         }
     #endif
         int i = 0;
+        // the segment's first face in the table (one divide a segment; faces start 3 or 6 indices apart)
+        MagFace *tNext = (faceTab && !(segStart % 3)) ? faceTab + segStart / 3 : NULL;
         while (i < segCount) {
             const int remain = segCount - i;
             if (remain < 3) break;
@@ -892,8 +894,8 @@ namespace GAPI {
             // the face: from the mesh's table (worked out the first time it was drawn), or worked out now
             MagFace own0;
             const MagFace *F;
-            if (faceTab && !(pos % 3)) {
-                MagFace *t = faceTab + pos / 3;
+            if (tNext) {
+                MagFace *t = tNext;
                 if (t->ver != faceVer) magBuildFace(*t, indices + pos, remain, vBase, faceVer);
                 // a segment edge decides triangle or quad differently: as the old loop did, here and now
                 if ((t->flags & MAG_F_QUAD) ? remain < 6 : ((t->flags & MAG_F_SHORT) && remain >= 6)) {
@@ -908,6 +910,7 @@ namespace GAPI {
             const bool isTriangle = !(F->flags & MAG_F_QUAD);
             const int count = isTriangle ? 3 : 4;
             i += F->step;
+            if (tNext) tNext += F->step == 6 ? 2 : 1;
             const Vertex *const *vx = F->v;
             const bool plainFace = (F->flags & MAG_F_PLAIN) != 0;
             MAG_COUNT(0, 1);
