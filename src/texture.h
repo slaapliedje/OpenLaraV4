@@ -708,6 +708,11 @@ struct Texture : GAPI::Texture {
     static Texture* Load(Stream &stream, bool border = true) {
         uint32 width, height;
         uint8 *data = LoadDATA(stream, width, height);
+        // opaque black as RGBA bytes in memory (0xFF000000 is that only on little-endian machines:
+        // on the 68k it is opaque red, a red line down the side of the title picture)
+        const uint8 blackBytes[4] = { 0, 0, 0, 255 };
+        uint32 black;
+        memcpy(&black, blackBytes, 4);
 
     // convert to POT size if NPOT isn't supported
         uint32 dw = Core::support.texNPOT ? width  : nextPow2(width);
@@ -719,7 +724,7 @@ struct Texture : GAPI::Texture {
 
             for (uint32 j = 0; j < dh; j++)
                 for (uint32 i = 0; i < dw; i++)
-                    *dst++ = (i < width && j < height) ? *src++ : 0xFF000000;
+                    *dst++ = (i < width && j < height) ? *src++ : black;
 
             delete[] data;
             data = (uint8*)dataPOT;
@@ -727,7 +732,7 @@ struct Texture : GAPI::Texture {
 
         if (border) {
             for (uint32 y = 0; y < height; y++)
-                ((uint32*)data)[y * dw] = ((uint32*)data)[y * dw + dw - 1] = 0xFF000000;
+                ((uint32*)data)[y * dw] = ((uint32*)data)[y * dw + dw - 1] = black;
         }
 
         Texture *tex = new Texture(dw, dh, 1, FMT_RGBA, 0, data);
