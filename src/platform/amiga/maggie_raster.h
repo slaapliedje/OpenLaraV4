@@ -84,8 +84,9 @@
         int32   xmin, xmax;              // 28.4
     };
 
-    // the next edge of a chain (dir: +1 right side, n - 1 left side) that covers line y
-    __attribute__((noinline)) bool magEdgeNext(MagEdge &e, MagVtx *const *p, int n, int dir, int32 y, int bottom) {
+    // the next edge of a chain (dir: +1 right side, n - 1 left side) that covers line y. Inlined: a call
+    // with its register saves costs ~30 cycles on the 68080 (cpuprobe), a few thousand times a frame
+    __attribute__((always_inline)) inline bool magEdgeNext(MagEdge &e, MagVtx *const *p, int n, int dir, int32 y, int bottom) {
         int from;
         do {
             from = e.i;
@@ -347,7 +348,7 @@
     };
 
     // xL, xR: the edges' 16.16 x at the line's centre
-    __attribute__((noinline)) void magPerspSample(const MagPersp &P, int32 y, int32 xL, int32 xR, MagPerspSample &o) {
+    __attribute__((always_inline)) inline void magPerspSample(const MagPersp &P, int32 y, int32 xL, int32 xR, MagPerspSample &o) {
         float fy = float(y - P.y0);
         float qy = P.q0 + fy * P.qdy, uy = P.uq0 + fy * P.udy, vy = P.vq0 + fy * P.vdy;
         // pixel x has its centre at x + 0.5, and the planes are anchored at X0's centre
