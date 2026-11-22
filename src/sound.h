@@ -39,6 +39,10 @@
 #define SND_PAN_FACTOR      0.7f
 #define SND_FACING_FACTOR   0.3f
 
+#ifdef OL_AMMX
+extern "C" void magVolAMMX(short *frames, long groups, long factor);   // platform/amiga/asm/mixammx.s
+#endif
+
 namespace Sound {
 
     static const int8 SPU_POS[] = { 0, 60, 115,  98, 122 };
@@ -1097,6 +1101,19 @@ namespace Sound {
             vec2 pan = getPan();
             vec2 vol = pan * VOL_CONV(v);
             if (volumeDelta == 0.0f) {
+            #ifdef OL_AMMX
+                // constant volume on the 68080: AMMX PMUL88, four samples per instruction (8.8 volume)
+                {
+                    int32 vl8 = int32(vol.x * 256.0f + 0.5f), vr8 = int32(vol.y * 256.0f + 0.5f);
+                    vl8 = vl8 < 0 ? 0 : (vl8 > 32767 ? 32767 : vl8);
+                    vr8 = vr8 < 0 ? 0 : (vr8 > 32767 ? 32767 : vr8);
+                    magVolAMMX((short*)frames, i >> 1, (vl8 << 16) | vr8);
+                    if (i & 1) {
+                        frames[i - 1].L = int16((int32(frames[i - 1].L) * vl8) >> 8);
+                        frames[i - 1].R = int16((int32(frames[i - 1].R) * vr8) >> 8);
+                    }
+                }
+            #else
                 // constant volume (nearly always): 16.16 fixed point, truncated towards zero as the float
                 // version's int() is; the float loop below costs a float compare per sample and an
                 // int-float-int round trip per channel (68080: about 25 cycles a frame)
@@ -1106,6 +1123,7 @@ namespace Sound {
                     frames[j].L = int16((pl + ((pl >> 31) & 0xFFFF)) >> 16);
                     frames[j].R = int16((pr + ((pr >> 31) & 0xFFFF)) >> 16);
                 }
+            #endif
             } else
             for (int j = 0; j < i; j++)
             {

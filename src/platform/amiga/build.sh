@@ -27,8 +27,11 @@ mkdir -p $B
 [ -f $B/stb_vorbis.o ] || $CC $FLAGS -c ../../libs/stb_vorbis/stb_vorbis.c -o $B/stb_vorbis.o
 [ -f $B/minimp3.o ]    || $CXX $FLAGS -std=c++11 -fno-exceptions -fno-rtti -c ../../libs/minimp3/minimp3.cpp -o $B/minimp3.o
 [ -f $B/tinflate.o ]   || $CC $FLAGS -c ../../libs/tinf/tinflate.c -o $B/tinflate.o
+# AMMX kernels (68080 only; the emulator build keeps the C versions)
+ASMOBJ=""
+case "$FLAGS" in *OL_EMU*) ;; *) $TC/bin/vasmm68k_mot -m68080 -Fhunk -quiet -o $B/mixammx.o asm/mixammx.s; ASMOBJ="$B/mixammx.o"; FLAGS="$FLAGS -DOL_AMMX" ;; esac
 $CXX $FLAGS -std=c++11 -fno-exceptions -fno-rtti -I../../ -Isdk-include -c main.cpp -o $B/main.o
-$CXX -m68060 -mhard-float -Wl,-Map=$B/map.txt $B/main.o $B/stb_vorbis.o $B/minimp3.o $B/tinflate.o -lm -o $OUT
+$CXX -m68060 -mhard-float -Wl,-Map=$B/map.txt $B/main.o $ASMOBJ $B/stb_vorbis.o $B/minimp3.o $B/tinflate.o -lm -o $OUT
 cp $OUT $B/$OUT.debug                  # unstripped, for crashaddr.py
 $TC/bin/m68k-amigaos-strip $OUT
 ls -l $OUT
