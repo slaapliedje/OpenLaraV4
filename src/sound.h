@@ -243,6 +243,8 @@ namespace Sound {
         virtual int decode(Frame *frames, int count) { return 0; }
         // a mono PCM sound in memory (a level's sound effect), for hardware channels: its bytes and format
         virtual bool hwSource(const uint8 *&src, int &bytes, int &bits, int &rate) { return false; }
+        // samples already as Arne plays them (16-bit big-endian, 8-byte aligned, in memory): the music
+        virtual bool hwDirect(const int16 *&data, uint32 &frames, int &ch, int &rate) { return false; }
         virtual void replay() { stream->seek(offset - stream->pos); }
 
         __attribute__((always_inline)) inline int resample(Sound::Frame *frames, Sound::Frame &frame) {
@@ -396,10 +398,16 @@ namespace Sound {
 
         virtual void replay() { pos = 0; }
 
+        virtual bool hwDirect(const int16 *&d, uint32 &n, int &ch, int &rate) {
+            if ((uint32(data) & 7) || frames < 2) return false;
+            d = (const int16*)data; n = uint32(frames) & ~1U; ch = channels; rate = freq;
+            return true;
+        }
+
         // the file in memory -> a decoder, or NULL if it is not 16-bit PCM at 44100 / 22050 / 11025 Hz
         static AIFF* open(Stream *stream) {
             if (stream->size < 54) return NULL;
-            uint8 *mem = new uint8[stream->size];
+            uint8 *mem = new uint8[stream->size + 16];   // room to move the samples to an 8-byte boundary
             stream->setPos(0);
             stream->raw(mem, stream->size);
             #define AIFF_BE32(q) ((uint32(q[0]) << 24) | (uint32(q[1]) << 16) | (uint32(q[2]) << 8) | uint32(q[3]))
@@ -432,6 +440,12 @@ namespace Sound {
             if (!ssnd || bits != 16 || ch < 1 || ch > 2 || (rate != 44100 && rate != 22050 && rate != 11025)) { delete[] mem; return NULL; }
             uint32 avail = ssndLen / uint32(ch * 2);
             if (nFrames > avail) nFrames = avail;
+            // Arne's DMA wants the samples 8-byte aligned: moved within the block if they are not
+            uint8 *aligned = (uint8*)((uint32(ssnd) + 7) & ~7U);
+            if (aligned != ssnd) {
+                memmove(aligned, ssnd, nFrames * uint32(ch * 2));
+                ssnd = aligned;
+            }
             return new AIFF(stream, mem, ssnd, int(nFrames), ch, rate);
         }
     };
@@ -1030,12 +1044,13 @@ namespace Sound {
         int     hwCh;                    // Arne channel playing it, or -1 (software mixing)
         bool    hwTried;                 // a channel was looked for when it started
         const Arne::Buf *hwBuf;
+        int     hwRate;                  // its sample rate (for the period)
     #endif
 
         Sample(Decoder *decoder, float volume, float pitch, int flags, int id) : uniquePtr(NULL), decoder(decoder), volume(volume), volumeTarget(volume), volumeDelta(0.0f), pitch(pitch), flags(flags), id(id)
         {
         #ifdef OL_ARNE
-            hwCh = -1; hwTried = false; hwBuf = NULL;
+            hwCh = -1; hwTried = false; hwBuf = NULL; hwRate = 0;
         #endif
             isPlaying = decoder != NULL;
             isPaused  = false;
@@ -1045,7 +1060,7 @@ namespace Sound {
         Sample(Stream *stream, const vec3 *pos, float volume, float pitch, int flags, int id) : uniquePtr(pos), decoder(NULL), volume(volume), volumeTarget(volume), volumeDelta(0.0f), pitch(pitch), flags(flags), id(id)
         {
         #ifdef OL_ARNE
-            hwCh = -1; hwTried = false; hwBuf = NULL;
+            hwCh = -1; hwTried = false; hwBuf = NULL; hwRate = 0;
         #endif
             this->pos = pos ? *pos : vec3(0.0f);
 
@@ -1386,7 +1401,8 @@ namespace Sound {
     uint16 arneVolume(Sample *s)
     {
         if (s->isPaused) return 0;
-        float v = s->volume * (Core::settings.audio.sound / float(SND_MAX_VOLUME));
+        const int setting = (s->flags & MUSIC) ? Core::settings.audio.music : Core::settings.audio.sound;
+        float v = s->volume * (setting / float(SND_MAX_VOLUME));
         vec2 pan = s->getPan();
         return Arne::volume(pan.x * v, pan.y * v);
     }
@@ -1404,17 +1420,26 @@ namespace Sound {
         for (int i = 0; i < channelsCount; i++)
         {
             Sample *s = channels[i];
-            if (s->flags & MUSIC) continue;
             if (s->hwCh < 0) {
                 if (s->hwTried || !s->isPlaying || !s->decoder) continue;
                 s->hwTried = true;
+                // music already in Arne's format (AIFF in memory): straight from its buffer, stereo
+                const int16 *direct; uint32 dFrames; int dCh, dRate;
+                if (s->decoder->hwDirect(direct, dFrames, dCh, dRate)) {
+                    int n = Arne::alloc();
+                    if (n < 0) continue;
+                    s->hwCh = n; s->hwBuf = NULL; s->hwRate = dRate;
+                    Arne::start(n, direct, dFrames, (s->flags & LOOP) != 0, arneVolume(s), Arne::period(dRate, s->pitch > 0.0f ? s->pitch : 1.0f), dCh == 2);
+                    continue;
+                }
+                if (s->flags & MUSIC) continue;  // other music (Ogg, movie soundtracks): software
                 const uint8 *src; int bytes, bits, rate;
                 if (!s->decoder->hwSource(src, bytes, bits, rate)) continue;
                 const Arne::Buf *b = Arne::get(src, bytes, bits, rate);
                 if (!b) continue;
                 int n = Arne::alloc();
                 if (n < 0) continue;
-                s->hwCh = n; s->hwBuf = b;
+                s->hwCh = n; s->hwBuf = b; s->hwRate = b->freq;
                 Arne::start(n, b->data, b->frames, (s->flags & LOOP) != 0, arneVolume(s), Arne::period(b->freq, s->pitch));
                 continue;
             }
@@ -1431,7 +1456,7 @@ namespace Sound {
             }
             if (!s->isPlaying) { Arne::stop(n); s->hwCh = -1; continue; }
             Arne::setVolume(n, arneVolume(s));
-            Arne::setPeriod(n, Arne::period(s->hwBuf->freq, s->pitch));
+            Arne::setPeriod(n, Arne::period(s->hwRate, s->pitch > 0.0f ? s->pitch : 1.0f));
         }
     }
 #endif

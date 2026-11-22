@@ -72,13 +72,13 @@ namespace Arne {
         return uint16((vl << 8) | vr);
     }
 
-    // data: 16-bit mono big-endian, 8-byte aligned; frames even
-    inline void start(int n, const int16 *data, uint32 frames, bool loop, uint16 vol, uint16 per) {
+    // data: 16-bit big-endian, mono or interleaved stereo, 8-byte aligned; frames even
+    inline void start(int n, const int16 *data, uint32 frames, bool loop, uint16 vol, uint16 per, bool stereo = false) {
         ARNE_REG_W(ARNE_DMACON2) = 1 << (n - 4);
         ARNE_REG_L(ARNE_CH(n))      = uint32(data);
         ARNE_REG_L(ARNE_CH(n) + 4)  = frames / 2;
         ARNE_REG_W(ARNE_CH(n) + 8)  = vol;
-        ARNE_REG_W(ARNE_CH(n) + 10) = loop ? 0x0001 : 0x0003;
+        ARNE_REG_W(ARNE_CH(n) + 10) = (stereo ? 0x0005 : 0x0001) | (loop ? 0 : 0x0002);
         ARNE_REG_W(ARNE_CH(n) + 12) = per;
         ARNE_REG_W(ARNE_INTREQ2)    = 1 << (n - 4);
         ARNE_REG_W(ARNE_DMACON2)    = 0x8000 | (1 << (n - 4));
