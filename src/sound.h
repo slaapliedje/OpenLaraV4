@@ -36,6 +36,8 @@
 #define SND_FADEOFF_DIST    (1024.0f * 8.0f)
 #define SND_LOWPASS_FREQ    0.2f
 #define SND_MAX_VOLUME      20
+#define AIFF_HEAD           4096        // bytes read when an AIFF track starts (the header)
+#define AIFF_PUMP           (32 * 1024) // bytes read per mixer pass after that (1.4 MB/s)
 #define SND_PAN_FACTOR      0.7f
 #define SND_FACING_FACTOR   0.3f
 
@@ -246,6 +248,8 @@ namespace Sound {
         // samples already as Arne plays them (16-bit big-endian, 8-byte aligned, in memory): the music
         virtual bool hwDirect(const int16 *&data, uint32 &frames, int &ch, int &rate) { return false; }
         virtual void replay() { stream->seek(offset - stream->pos); }
+        // the sound task's turn to read more of a file it plays from memory (AIFF)
+        virtual void pump() {}
 
         __attribute__((always_inline)) inline int resample(Sound::Frame *frames, Sound::Frame &frame) {
             if (freq == 44100) {
@@ -372,26 +376,47 @@ namespace Sound {
     // then played from memory - no decoding, and on a big-endian machine not even a byte swap.
     // 22050 / 11025 Hz are stretched to 44.1 kHz like the PCM sounds.
     struct AIFF : Decoder {
-        uint8       *mem;                // the file
-        const uint8 *data;               // first sample frame
+        uint8       *mem;                // the samples' block (owned)
+        uint8       *data;               // first sample frame, 8-byte aligned
+        uint32       bytes, loaded;      // sample bytes in all / read in so far
         int          frames, pos;
 
-        // mem: the whole file (owned); data / frames / ch / rate from its COMM and SSND chunks
-        AIFF(Stream *stream, uint8 *mem, const uint8 *data, int frames, int ch, int rate)
-            : Decoder(stream, ch, rate), mem(mem), data(data), frames(frames), pos(0) {}
+        // The file is read into memory by the sound task, a piece per mixer pass (pump), so starting a
+        // track costs the main thread only its header: Arne plays from the start of the block while the
+        // rest comes in, at many times the speed it plays.
+        AIFF(Stream *stream, uint8 *mem, uint8 *data, uint32 bytes, uint32 loaded, int ch, int rate)
+            : Decoder(stream, ch, rate), mem(mem), data(data), bytes(bytes), loaded(loaded), frames(int(bytes / uint32(ch * 2))), pos(0) {
+            if (loaded >= bytes) done();
+        }
 
         virtual ~AIFF() { delete[] mem; }
+
+        void done() { delete stream; stream = NULL; }   // all in: the file is closed
+
+        virtual void pump() {
+            if (!stream || loaded >= bytes) return;
+            uint32 n = bytes - loaded;
+            if (n > AIFF_PUMP) n = AIFF_PUMP;
+            stream->raw(data + loaded, int(n));
+            loaded += n;
+            if (loaded >= bytes) done();
+        }
 
         virtual int decode(Frame *out, int count) {
             int done = 0;
             const int step = channels * 2;
+            const int avail = int(loaded / uint32(step));
             const uint8 *p = data + pos * step;
-            while (done < count && pos < frames) {
+            while (done < count && pos < avail) {
                 Frame f;
                 f.L = int16((p[0] << 8) | p[1]);
                 f.R = channels == 2 ? int16((p[2] << 8) | p[3]) : f.L;
                 p += step; pos++;
                 done += resample(out + done, f);
+            }
+            if (done < count && pos < frames) {  // still coming in: silence, not the end
+                memset(out + done, 0, sizeof(Frame) * (count - done));
+                done = count;
             }
             return done;
         }
@@ -399,29 +424,28 @@ namespace Sound {
         virtual void replay() { pos = 0; }
 
         virtual bool hwDirect(const int16 *&d, uint32 &n, int &ch, int &rate) {
-            if ((uint32(data) & 7) || frames < 2) return false;
+            if (frames < 2) return false;
             d = (const int16*)data; n = uint32(frames) & ~1U; ch = channels; rate = freq;
             return true;
         }
 
-        // the file in memory -> a decoder, or NULL if it is not 16-bit PCM at 44100 / 22050 / 11025 Hz
+        // the header -> a decoder, or NULL if it is not 16-bit PCM at 44100 / 22050 / 11025 Hz; the
+        // stream (positioned after its 4-byte "FORM") is the decoder's from then on
         static AIFF* open(Stream *stream) {
             if (stream->size < 54) return NULL;
-            uint8 *mem = new uint8[stream->size + 16];   // room to move the samples to an 8-byte boundary
+            uint8 head[AIFF_HEAD];
+            int headLen = stream->size < AIFF_HEAD ? stream->size : AIFF_HEAD;
             stream->setPos(0);
-            stream->raw(mem, stream->size);
+            stream->raw(head, headLen);
             #define AIFF_BE32(q) ((uint32(q[0]) << 24) | (uint32(q[1]) << 16) | (uint32(q[2]) << 8) | uint32(q[3]))
             int ch = 0, bits = 0, rate = 0;
-            uint32 nFrames = 0;
-            const uint8 *ssnd = NULL;
-            uint32 ssndLen = 0;
-            const uint8 *p = mem + 12, *end = mem + stream->size;
-            if (memcmp(mem, "FORM", 4) || memcmp(mem + 8, "AIFF", 4)) { delete[] mem; return NULL; }
-            while (p + 8 <= end) {
-                uint32 len = AIFF_BE32((p + 4));
-                const uint8 *body = p + 8;
-                if (body + len > end) len = uint32(end - body);
-                if (!memcmp(p, "COMM", 4) && len >= 18) {
+            uint32 nFrames = 0, ssndOfs = 0, ssndLen = 0;
+            if (memcmp(head, "FORM", 4) || memcmp(head + 8, "AIFF", 4)) return NULL;
+            uint32 at = 12;                      // file offset of the chunk header
+            while (at + 16 <= uint32(headLen)) {
+                const uint8 *c = head + at, *body = c + 8;
+                uint32 len = AIFF_BE32((c + 4));
+                if (!memcmp(c, "COMM", 4) && len >= 18 && at + 8 + 18 <= uint32(headLen)) {
                     ch = (body[0] << 8) | body[1];
                     nFrames = AIFF_BE32((body + 2));
                     bits = (body[6] << 8) | body[7];
@@ -429,24 +453,33 @@ namespace Sound {
                     int e = ((body[8] & 0x7F) << 8 | body[9]) - 16383;
                     uint32 m = AIFF_BE32((body + 10));
                     rate = (e >= 0 && e < 32) ? int(m >> (31 - e)) : 0;
-                } else if (!memcmp(p, "SSND", 4) && len >= 8) {
+                } else if (!memcmp(c, "SSND", 4) && len >= 8) {
                     uint32 offset = AIFF_BE32(body);
-                    ssnd = body + 8 + offset;
+                    ssndOfs = at + 16 + offset;
                     ssndLen = len - 8 - offset;
+                    break;                       // the samples run to the chunk's end
                 }
-                p = body + len + (len & 1);
+                at += 8 + len + (len & 1);
             }
             #undef AIFF_BE32
-            if (!ssnd || bits != 16 || ch < 1 || ch > 2 || (rate != 44100 && rate != 22050 && rate != 11025)) { delete[] mem; return NULL; }
+            if (!ssndOfs || bits != 16 || ch < 1 || ch > 2 || (rate != 44100 && rate != 22050 && rate != 11025)) return NULL;
+            if (ssndOfs + ssndLen > uint32(stream->size)) ssndLen = uint32(stream->size) > ssndOfs ? uint32(stream->size) - ssndOfs : 0;
             uint32 avail = ssndLen / uint32(ch * 2);
             if (nFrames > avail) nFrames = avail;
-            // Arne's DMA wants the samples 8-byte aligned: moved within the block if they are not
-            uint8 *aligned = (uint8*)((uint32(ssnd) + 7) & ~7U);
-            if (aligned != ssnd) {
-                memmove(aligned, ssnd, nFrames * uint32(ch * 2));
-                ssnd = aligned;
+            nFrames &= ~1U;                      // whole Arne blocks
+            if (nFrames < 2) return NULL;
+            uint32 bytes = nFrames * uint32(ch * 2);
+            uint8 *mem = new uint8[bytes + 8];
+            uint8 *data = (uint8*)((uint32(mem) + 7) & ~7U);   // Arne's DMA wants 8-byte alignment
+            uint32 have = 0;                     // samples already in the header read
+            if (ssndOfs < uint32(headLen)) {
+                have = uint32(headLen) - ssndOfs;
+                if (have > bytes) have = bytes;
+                memcpy(data, head + ssndOfs, have);
             }
-            return new AIFF(stream, mem, ssnd, int(nFrames), ch, rate);
+            stream->setPos(int(ssndOfs + have));
+            stream->buffering = false;           // straight into the block
+            return new AIFF(stream, mem, data, bytes, have, ch, rate);
         }
     };
 
@@ -1474,6 +1507,8 @@ namespace Sound {
     {
         OS_LOCK(lock);
         PROFILE_CPU_TIMING(stats.mixer);
+        for (int i = 0; i < channelsCount; i++)  // tracks still being read in: the next piece
+            if (channels[i]->decoder) channels[i]->decoder->pump();
     #ifdef OL_ARNE
         arneUpdate(count);
     #endif
