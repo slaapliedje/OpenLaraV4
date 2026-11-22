@@ -654,6 +654,10 @@ __attribute__((noinline)) static int olMain()
         int a = osGetTimeMS();
         bool draw = Game::update();
         if (Core::isQuit) break;
+        // a movie: drawn only when a new frame is due, so each reaches the screen within a few ms of
+        // its time (redrawing the same frame every pass put them up for uneven lengths)
+        if (draw && !headlessFrames && inventory && inventory->video && inventory->video->isPlaying && !inventory->video->needUpdate)
+            draw = false;
         // a level the loader rejected leaves an empty level behind: rendering it crashes the machine
         if (Game::level && Game::level->level.roomsCount == 0) {
             printf("level failed to load (unsupported format?) - quitting\n");

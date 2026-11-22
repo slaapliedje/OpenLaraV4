@@ -1549,15 +1549,22 @@ struct Video {
         stepTimer += Core::deltaTime;
         if (stepTimer < step)
             return;
+    #ifdef VIDEO_TEST
         stepTimer -= step;
         time += step;
-    #ifdef VIDEO_TEST
         int t = Core::getTime();
         while (decoder->decodeVideo(frameData)) {}
         LOG("time: %d\n", Core::getTime() - t);
         isPlaying = false;
     #else
-        isPlaying = needUpdate = decoder->decodeVideo(frameData);
+        // a late frame: the ones due since are decoded too (each builds on the last) and only the
+        // newest is shown, so the picture keeps up with the soundtrack
+        for (int n = 0; n < 4 && stepTimer >= step && isPlaying; n++) {
+            stepTimer -= step;
+            time += step;
+            isPlaying = needUpdate = decoder->decodeVideo(frameData);
+        }
+        if (stepTimer > step) stepTimer = step;
     #endif
     }
 
