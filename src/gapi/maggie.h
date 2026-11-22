@@ -741,6 +741,7 @@ namespace GAPI {
             magDipSize = 5;
             tex = NULL;
         }
+        if (MAG_STAGE(14)) { magDipTex = Mag::whiteTex; magDipSize = 5; }    // profiling: no texture fetches worth the name
         // bilinear on everything in the 3D scene (the engine marks its atlas tiles "nearest"); 2D stays sharp
         const bool filter = Mag::bilinear && tex && depthTest;
         Mag::setMode(0x0004 | (filter ? 0x0001 : 0) | (needZ ? 0x0002 : 0) | (needZ && (!depthWrite || blendAdd || blendMul) ? 0x0008 : 0) |
