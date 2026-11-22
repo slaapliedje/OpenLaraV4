@@ -593,6 +593,7 @@ __attribute__((noinline)) static int olMain()
 #endif
     if (GetVar((STRPTR)"OLPERSPERR", (STRPTR)envTmp, sizeof(envTmp), 0) > 0) { int e = atoi(envTmp); if (e >= 1 && e <= 8) Mag::perspErr = float(e); }
     if (GetVar((STRPTR)"OLNOALPHA", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::cpuAlpha = false;   // ENV:OLNOALPHA
+    if (GetVar((STRPTR)"OLZPROJ", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::zLinear = false;        // ENV:OLZPROJ
     if (GetVar((STRPTR)"OLNOMIP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::mipmaps = false;         // ENV:OLNOMIP
     if (GetVar((STRPTR)"OLNOBILINEAR", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::bilinear = false; // ENV:OLNOBILINEAR
 #endif

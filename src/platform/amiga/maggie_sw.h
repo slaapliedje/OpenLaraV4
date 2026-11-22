@@ -161,6 +161,7 @@ namespace Mag {
     #define MAG_STAGE(n)   false
     #define MAG_COUNT(i, n)
 #endif
+    bool     zLinear = true;             // depth = w, linear (ENV:OLZPROJ: the projection's z/w, as before)
     bool     perspective = true;         // F6 toggles: spans split into perspective-correct pieces
     #define  MAG_PERSP_STEP 64           // pixels per affine piece
     #define  MAG_PERSP_RATIO 1.3f        // 1/w varying less than this across a polygon/span: affine

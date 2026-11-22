@@ -37,7 +37,7 @@
 #define SND_LOWPASS_FREQ    0.2f
 #define SND_MAX_VOLUME      20
 #define AIFF_HEAD           4096        // bytes read when an AIFF track starts (the header)
-#define AIFF_PUMP           (32 * 1024) // bytes read per mixer pass after that (1.4 MB/s)
+#define AIFF_PUMP           (8 * 1024)  // bytes read per mixer pass after that (350 KB/s; the CF reads ~2.3 MB/s)
 #define SND_PAN_FACTOR      0.7f
 #define SND_FACING_FACTOR   0.3f
 

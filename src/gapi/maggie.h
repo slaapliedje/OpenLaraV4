@@ -536,8 +536,11 @@ namespace GAPI {
         int32 ix = magInt(x * invw * 16.0f), iy = magInt(y * invw * 16.0f);
         o.x = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
         o.y = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
-        int32 iz = magInt(z * invw * (65533.0f * 32768.0f));
-        o.z = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
+        if (Mag::zLinear) o.z = magZw(w);
+        else {
+            int32 iz = magInt(z * invw * (65533.0f * 32768.0f));
+            o.z = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
+        }
         o.q = magBits(w) > 0x41800000 ? invw : 1.0f / 16.0f;     // w > 16
         o.u = u;
         o.v = v;
@@ -1054,7 +1057,7 @@ namespace GAPI {
                     #endif
                         x->ix = ix > MAG_XY_MAX ? MAG_XY_MAX : (ix < -MAG_XY_MAX ? -MAG_XY_MAX : ix);
                         x->iy = iy > MAG_XY_MAX ? MAG_XY_MAX : (iy < -MAG_XY_MAX ? -MAG_XY_MAX : iy);
-                        x->iz = (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
+                        x->iz = Mag::zLinear ? magZw(x->w) : (iz < 0 ? 0 : (iz > 65533 * 32768 ? 65533 * 32768 : iz)) + 32768;
                         x->q = magBits(x->w) > 0x41800000 ? r : 1.0f / 16.0f;    // w > 16
                         x->fog = ortho ? 256 : magFog(x->w);
                         x->code |= 64;
