@@ -291,6 +291,9 @@ extern void  osMutexLock     (void *obj);
 extern void  osMutexUnlock   (void *obj);
 
 extern int   osGetTimeMS     ();
+#ifdef __AMIGA__
+extern bool  osNoVideo;          // no movies (headless runs)
+#endif
 
 extern bool  osJoyReady      (int index);
 extern void  osJoyVibrate    (int index, float L, float R);

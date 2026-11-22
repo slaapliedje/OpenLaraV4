@@ -176,6 +176,7 @@ namespace Mag {
     bool     bilinear = true;            // F8 toggles: filtered textures on 3D faces
     bool     roomCells = true;           // hardware back end: room cells outside the view skipped (ENV:OLNOCELLS)
     bool     normalCull = true;          // hardware back end: back faces dropped by their normal (ENV:OLNONCULL)
+    bool     faceCache = true;           // hardware back end: static meshes keep their faces worked out (ENV:OLNOFACES)
     float    perspErr = 1.0f;            // pixels; main sets width / 320 (2 at 640x480), ENV:OLPERSPERR overrides
     uint32   encodes = 0, encodeTexels = 0;   // OL_PROFILE: textures (re-)encoded to DXT1
     bool     cpuAlpha = true;            // ENV:OLNOALPHA: no CPU blending of translucent plain faces

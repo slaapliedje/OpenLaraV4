@@ -76,6 +76,9 @@ namespace Game {
 
         if (level->level.isTitle() && id != TR::LVL_MAX && !TR::isGameEnded)
             playVideo = false;
+    #ifdef __AMIGA__
+        if (osNoVideo) playLogo = playVideo = false;     // headless benchmark runs: straight into the level
+    #endif
 
         level->init(playLogo, playVideo);
 

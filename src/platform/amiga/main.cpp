@@ -53,6 +53,8 @@ static struct EClockVal eclock;
 static ULONG timeAcc = 0;   // 16.16 seconds
 static int fakeTimeMS = -1; // scripted headless runs: virtual time, 30 fps steps (deterministic)
 
+bool osNoVideo = false;
+
 int osGetTimeMS()
 {
     if (fakeTimeMS >= 0) return fakeTimeMS;
@@ -511,6 +513,7 @@ __attribute__((noinline)) static int olMain()
     // headless test (emulator, no RTG): OpenLara LEVEL FRAMES OUTPREFIX -> OUTPREFIX.txt (level stats,
     // frame times) and OUTPREFIX.raw (last frame, 320x240 RGB565 big-endian), then quits
     int headlessFrames = __argc > 3 ? atoi(__argv[2]) : 0;
+    osNoVideo = headlessFrames > 0;
     const char *outPrefix = __argc > 3 ? __argv[3] : NULL;
     FindTask(NULL)->tc_TrapCode = (APTR)olTrapHandler;
     // the game loop never waits: above priority 0 it starves the network stack, sshd and rsh
@@ -572,6 +575,7 @@ __attribute__((noinline)) static int olMain()
     if (GetVar((STRPTR)"OLNOZ", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::zEnabled = false;   // ENV:OLNOZ: no depth buffer
     if (GetVar((STRPTR)"OLNOPERSP", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::perspective = false; // ENV:OLNOPERSP
     if (GetVar((STRPTR)"OLNONCULL", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::normalCull = false;    // ENV:OLNONCULL
+    if (GetVar((STRPTR)"OLNOFACES", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::faceCache = false;     // ENV:OLNOFACES
     if (GetVar((STRPTR)"OLNOCELLS", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::roomCells = false;     // ENV:OLNOCELLS
     if (GetVar((STRPTR)"OLPICK", (STRPTR)envTmp, sizeof(envTmp), 0) > 0) sscanf(envTmp, "%d,%d", &Mag::pickX, &Mag::pickY);
     // the texture error bound in pixels: the same size on screen at every resolution (1 px per 320

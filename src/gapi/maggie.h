@@ -219,6 +219,22 @@ namespace GAPI {
         }
     };
 
+// What a face is, worked out once per static mesh (DIP): its corners, triangle or quad, and the tests
+// the draw loop would otherwise repeat for every face of every frame
+    struct MagFace {
+        const Vertex *v[4];
+        float  nx, ny, nz, nd;           // face plane (MAG_F_CULL): n . p - nd, the normal of length 32767
+        uint32 ver;                      // built for this version of the mesh (0 = not yet)
+        uint8  step;                     // indices it takes: 3 or 6
+        uint8  flags;                    // MAG_F_*
+        uint16 pad;
+    };
+    #define MAG_F_QUAD   1               // two triangles 012 023
+    #define MAG_F_FLAT   2               // a parallelogram with matching texture corners: one plane fits all four
+    #define MAG_F_PLAIN  4               // corners 0..2 on one texel: a plain coloured face
+    #define MAG_F_CULL   8               // corners share one face normal: cull by the plane before transforming
+    #define MAG_F_SHORT 16               // a triangle only because the segment ended
+
 // Mesh
     struct Mesh {
         Index        *iBuffer;
@@ -227,8 +243,10 @@ namespace GAPI {
         int          iCount;
         int          vCount;
         bool         dynamic;
+        MagFace      *faceTab;           // static meshes: one entry per 3 indices, built as faces are first drawn
+        uint32       faceVer;
 
-        Mesh(bool dynamic) : iBuffer(NULL), vBuffer(NULL), dynamic(dynamic) {}
+        Mesh(bool dynamic) : iBuffer(NULL), vBuffer(NULL), dynamic(dynamic), faceTab(NULL), faceVer(1) {}
 
         void init(Index *indices, int iCount, ::Vertex *vertices, int vCount, int aCount) {
             this->iCount  = iCount;
@@ -243,6 +261,8 @@ namespace GAPI {
         void deinit() {
             delete[] iBuffer;
             delete[] vBuffer;
+            delete[] faceTab;
+            faceTab = NULL;
         }
 
         void update(Index *indices, int iCount, ::Vertex *vertices, int vCount) {
@@ -253,6 +273,7 @@ namespace GAPI {
             if (vertices) {
                 memcpy(vBuffer, vertices, vCount * sizeof(vertices[0]));
             }
+            if (++faceVer == 0) faceVer = 1;     // cached faces are stale
         }
 
         void bind(const MeshRange &range) const {}
@@ -666,6 +687,37 @@ namespace GAPI {
         return d == 0;
     }
 
+    // Work out a face at idx (remain indices left in its segment); vb = the range's first vertex.
+    // The same decisions the draw loop used to make for every face of every frame.
+    void magBuildFace(MagFace &F, const Index *idx, int remain, const Vertex *vb, uint32 ver) {
+        const Vertex *a = vb + idx[0], *b = vb + idx[1], *c = vb + idx[2];
+        const bool quadShape = a->normal.w != 1 && idx[3] == idx[0] && idx[4] == idx[2];
+        const bool tri = !quadShape || remain < 6;
+        F.v[0] = a; F.v[1] = b; F.v[2] = c; F.v[3] = tri ? c : vb + idx[5];
+        F.step = tri ? 3 : 6;
+        uint8 fl = (quadShape && remain < 6) ? MAG_F_SHORT : 0;
+        if (!tri) {
+            fl |= MAG_F_QUAD;
+            const short4 &A = a->coord, &B = b->coord, &C = c->coord, &D = F.v[3]->coord;
+            const short4 &TA = a->texCoord, &TB = b->texCoord, &TC = c->texCoord, &TD = F.v[3]->texCoord;
+            if ((uint32(A.x + C.x - B.x - D.x + 1) <= 2) && (uint32(A.y + C.y - B.y - D.y + 1) <= 2) &&
+                (uint32(A.z + C.z - B.z - D.z + 1) <= 2) &&
+                (uint32(TA.x + TC.x - TB.x - TD.x + 96) <= 192) && (uint32(TA.y + TC.y - TB.y - TD.y + 96) <= 192))
+                fl |= MAG_F_FLAT;
+        }
+        if (a->texCoord.x == b->texCoord.x && a->texCoord.x == c->texCoord.x &&
+            a->texCoord.y == b->texCoord.y && a->texCoord.y == c->texCoord.y) fl |= MAG_F_PLAIN;
+        const short4 &n = a->normal, &n1 = b->normal, &n2 = c->normal;
+        if (n.x == n1.x && n.y == n1.y && n.z == n1.z && n.x == n2.x && n.y == n2.y && n.z == n2.z &&
+            abs(n.x) + abs(n.y) + abs(n.z) > 30000) {
+            fl |= MAG_F_CULL;
+            F.nx = float(n.x); F.ny = float(n.y); F.nz = float(n.z);
+            F.nd = F.nx * float(a->coord.x) + F.ny * float(a->coord.y) + F.nz * float(a->coord.z);
+        }
+        F.flags = fl;
+        F.ver = ver;
+    }
+
     void DIP(Mesh *mesh, const MeshRange &range) {
         if (MAG_STAGE(4)) return;
         const Index  *indices  = mesh->iBuffer;
@@ -707,6 +759,14 @@ namespace GAPI {
             magPrimBuf = (MagPrim*)realloc(magPrimBuf, magPrimCap * sizeof(MagPrim));
         }
         if (!magVtxBuf || !magPrimBuf) { magVtxCap = magPrimCap = 0; return; }
+        // static meshes keep their faces worked out (dynamic ones change every frame)
+        if (!mesh->dynamic && !mesh->faceTab && Mag::faceCache) {
+            mesh->faceTab = new MagFace[mesh->iCount / 3 + 1];
+            if (mesh->faceTab) memset(mesh->faceTab, 0, (mesh->iCount / 3 + 1) * sizeof(MagFace));
+        }
+        MagFace *const faceTab = (!mesh->dynamic && Mag::faceCache) ? mesh->faceTab : NULL;
+        const uint32 faceVer = mesh->faceVer;
+        const Vertex *const vBase = vertices + vStart;
 
         // Everything that depends only on the matrices is kept while they stay the same: a room's draw
         // calls (one per texture tile) share them, and many of their corners.
@@ -825,29 +885,37 @@ namespace GAPI {
     #endif
         int i = 0;
         while (i < segCount) {
-            const Index *idx = indices + segStart + i;
-            const Vertex *vx[4];
-            vx[0] = vertices + vStart + idx[0];
-            vx[1] = vertices + vStart + idx[1];
-            vx[2] = vertices + vStart + idx[2];
-            // quads come as two triangles 012 023
-            const bool isTriangle = vx[0]->normal.w == 1 || i + 6 > segCount || idx[3] != idx[0] || idx[4] != idx[2];
+            const int remain = segCount - i;
+            if (remain < 3) break;
+            const int pos = segStart + i;
+            // the face: from the mesh's table (worked out the first time it was drawn), or worked out now
+            MagFace own0;
+            const MagFace *F;
+            if (faceTab && !(pos % 3)) {
+                MagFace *t = faceTab + pos / 3;
+                if (t->ver != faceVer) magBuildFace(*t, indices + pos, remain, vBase, faceVer);
+                // a segment edge decides triangle or quad differently: as the old loop did, here and now
+                if ((t->flags & MAG_F_QUAD) ? remain < 6 : ((t->flags & MAG_F_SHORT) && remain >= 6)) {
+                    magBuildFace(own0, indices + pos, remain, vBase, 0);
+                    F = &own0;
+                } else
+                    F = t;
+            } else {
+                magBuildFace(own0, indices + pos, remain, vBase, 0);
+                F = &own0;
+            }
+            const bool isTriangle = !(F->flags & MAG_F_QUAD);
             const int count = isTriangle ? 3 : 4;
-            i += isTriangle ? 3 : 6;
-            if (i > segCount) break;
-            if (!isTriangle) vx[3] = vertices + vStart + idx[5];
+            i += F->step;
+            const Vertex *const *vx = F->v;
+            const bool plainFace = (F->flags & MAG_F_PLAIN) != 0;
             MAG_COUNT(0, 1);
             magDbgCulled = false;
             if (MAG_STAGE(9)) continue;
-            if (normalCull) {
-                const short4 &n = vx[0]->normal, &n1 = vx[1]->normal, &n2 = vx[2]->normal;
-                if (n.x == n1.x && n.y == n1.y && n.z == n1.z && n.x == n2.x && n.y == n2.y && n.z == n2.z &&
-                    abs(n.x) + abs(n.y) + abs(n.z) > 30000) {
-                    float d = (float(n.x) * (camX - float(vx[0]->coord.x)) + float(n.y) * (camY - float(vx[0]->coord.y)) +
-                               float(n.z) * (camZ - float(vx[0]->coord.z))) * cullSide;
-                    // more than 4 units behind the face's plane (the normal has length 32767)
-                    if (magBits(d + 131068.0f) < 0) { if (!MAG_STAGE(7)) continue; magDbgCulled = true; }
-                }
+            if (normalCull && (F->flags & MAG_F_CULL)) {
+                float d = (F->nx * camX + F->ny * camY + F->nz * camZ - F->nd) * cullSide;
+                // more than 4 units behind the face's plane (the normal has length 32767)
+                if (magBits(d + 131068.0f) < 0) { if (!MAG_STAGE(7)) continue; magDbgCulled = true; }
             }
             MAG_COUNT(1, count);
 
@@ -996,12 +1064,7 @@ namespace GAPI {
                 float abx = e[1]->px - e[0]->px, aby = e[1]->py - e[0]->py, acx = e[2]->px - e[0]->px, acy = e[2]->py - e[0]->py;
                 area = abx * acy - acx * aby;
                 if (!isTriangle) {
-                    // a parallelogram with matching texture corners: one plane fits all four
-                    const short4 &A = vx[0]->coord, &B = vx[1]->coord, &C = vx[2]->coord, &D = vx[3]->coord;
-                    const short4 &TA = vx[0]->texCoord, &TB = vx[1]->texCoord, &TC = vx[2]->texCoord, &TD = vx[3]->texCoord;
-                    flat = (uint32(A.x + C.x - B.x - D.x + 1) <= 2) && (uint32(A.y + C.y - B.y - D.y + 1) <= 2) &&
-                           (uint32(A.z + C.z - B.z - D.z + 1) <= 2) &&
-                           (uint32(TA.x + TC.x - TB.x - TD.x + 96) <= 192) && (uint32(TA.y + TC.y - TB.y - TD.y + 96) <= 192);
+                    flat = (F->flags & MAG_F_FLAT) != 0;     // a parallelogram: one plane fits all four
                     float adx = e[3]->px - e[0]->px, ady = e[3]->py - e[0]->py;
                     area2 = acx * ady - adx * acy;
                 }
@@ -1019,9 +1082,7 @@ namespace GAPI {
             // mostly transparent are left out, the rest drawn solid
             bool cpuAlpha = false;
             if (alphaDraw && vx[0]->light.w < 250) {
-                cpuAlpha = Mag::cpuAlpha && !behind &&
-                           vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
-                           vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y;
+                cpuAlpha = Mag::cpuAlpha && !behind && plainFace;
                 if (!cpuAlpha && blendMode == RS_BLEND_ALPHA && vx[0]->light.w < 128) continue;
             }
 
@@ -1032,9 +1093,7 @@ namespace GAPI {
             uint32 tint;
             // textured faces use the overbright scale (their texels are stored brighter); plain ones (the
             // white texel: untextured draws, all corners on one texel) the plain one
-            const int32 iScale = (tex && !(vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
-                                          vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y))
-                                 ? MAG_I_TEX : MAG_I_PLAIN;
+            const int32 iScale = (tex && !plainFace) ? MAG_I_TEX : MAG_I_PLAIN;
         #ifdef ROOM_COLOUR_DONE
             if (!lit && !clip && vx[0]->color.w == ROOM_COLOUR_DONE) {
                 const ubyte4 &c = vx[0]->color;
@@ -1086,8 +1145,7 @@ namespace GAPI {
                 }
             }
             // all corners on one texel: a plain coloured face (UI bars and frames)
-            if (vx[0]->texCoord.x == vx[1]->texCoord.x && vx[0]->texCoord.x == vx[2]->texCoord.x &&
-                vx[0]->texCoord.y == vx[1]->texCoord.y && vx[0]->texCoord.y == vx[2]->texCoord.y) tint |= 0x01000000;
+            if (plainFace) tint |= 0x01000000;
             if (cpuAlpha) {                  // the colour Maggie would draw, and the corners' alpha in l (0..256 << 16)
                 int32 in = (l[0] >> 15) + 1;
                 uint32 r = (((tint >> 16) & 255) * in) >> 16, g = (((tint >> 8) & 255) * in) >> 16, b = ((tint & 255) * in) >> 16;
