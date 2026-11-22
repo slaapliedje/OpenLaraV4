@@ -568,6 +568,13 @@ __attribute__((noinline)) static int olMain()
     // quarters of the machine: off unless ENV:OLREVERB is set, whatever the saved settings say.
     Core::settings.audio.reverb = GetVar((STRPTR)"OLREVERB", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0;
     bool sound = !headlessFrames && !noSound && sndStart();
+#ifdef OL_ARNE
+    // sound effects on Arne's hardware channels (live game only; ENV:OLNOARNE mixes them in software)
+    if (sound && GetVar((STRPTR)"OLNOARNE", (STRPTR)envTmp, sizeof(envTmp), 0) < 0) {
+        Arne::init();
+        printf("arne: %s, channels %04x (AHI's channel 7 and busy ones left alone)\n", Arne::enabled ? "on" : "off", (unsigned)Arne::usable);
+    }
+#endif
 #ifdef OL_MAGGIE
 #ifdef OL_PROFILE
     if (GetVar((STRPTR)"OLDBG", (STRPTR)envTmp, sizeof(envTmp), 0) >= 0) Mag::dbg = atoi(envTmp);
@@ -747,6 +754,9 @@ __attribute__((noinline)) static int olMain()
     printf("CNT perspLines %u pixels %u extraPieces %u sampledSpans %u affineSpans %u\n", Mag::cnt[11], Mag::cnt[15], Mag::cnt[14], Mag::cnt[12], Mag::cnt[13]);
 #endif
     if (sound) sndStop();
+#ifdef OL_ARNE
+    Arne::shutdown();                    // after the sound task: no pass can start a channel now
+#endif
     if (sndDump && sndMixCount) {
         ULONG us = (ULONG)(((uint64)sndMixTime * 1000000) >> 16) / sndMixCount;
         printf("mixer: %lu.%lu ms per %d frames (23.2 ms of sound)\n", us / 1000, (us / 100) % 10, SND_DUMP_FRAMES);

@@ -39,6 +39,9 @@
 #define SND_PAN_FACTOR      0.7f
 #define SND_FACING_FACTOR   0.3f
 
+#ifdef OL_ARNE
+#include "platform/amiga/arne.h"   // hardware channels for the sound effects
+#endif
 #ifdef OL_AMMX
 extern "C" void magVolAMMX(short *frames, long groups, long factor);   // platform/amiga/asm/mixammx.s
 #endif
@@ -238,6 +241,8 @@ namespace Sound {
 
         virtual ~Decoder() { delete stream; }
         virtual int decode(Frame *frames, int count) { return 0; }
+        // a mono PCM sound in memory (a level's sound effect), for hardware channels: its bytes and format
+        virtual bool hwSource(const uint8 *&src, int &bytes, int &bits, int &rate) { return false; }
         virtual void replay() { stream->seek(offset - stream->pos); }
 
         __attribute__((always_inline)) inline int resample(Sound::Frame *frames, Sound::Frame &frame) {
@@ -285,6 +290,15 @@ namespace Sound {
         int size, bits;
 
         PCM(Stream *stream, int channels, int freq, int size, int bits) : Decoder(stream, channels, freq), size(size), bits(bits) {}
+
+        virtual bool hwSource(const uint8 *&src, int &bytes, int &bitsOut, int &rate) {
+            if (!stream || !stream->data || channels != 1 || !(bits == 16 || bits == 8 || bits == -8)) return false;
+            if (freq != 11025 && freq != 22050 && freq != 44100) return false;
+            src = (const uint8*)stream->data + offset;
+            bytes = size < stream->size - offset ? size : stream->size - offset;
+            bitsOut = bits; rate = freq;
+            return bytes > 4;
+        }
 
         virtual int decode(Frame *frames, int count) {
             if (stream->pos - offset >= size) return 0;
@@ -942,9 +956,17 @@ namespace Sound {
         bool    isPlaying;
         bool    isPaused;
         bool    stopAfterFade;
+    #ifdef OL_ARNE
+        int     hwCh;                    // Arne channel playing it, or -1 (software mixing)
+        bool    hwTried;                 // a channel was looked for when it started
+        const Arne::Buf *hwBuf;
+    #endif
 
         Sample(Decoder *decoder, float volume, float pitch, int flags, int id) : uniquePtr(NULL), decoder(decoder), volume(volume), volumeTarget(volume), volumeDelta(0.0f), pitch(pitch), flags(flags), id(id)
         {
+        #ifdef OL_ARNE
+            hwCh = -1; hwTried = false; hwBuf = NULL;
+        #endif
             isPlaying = decoder != NULL;
             isPaused  = false;
             stopAfterFade = true;
@@ -952,6 +974,9 @@ namespace Sound {
 
         Sample(Stream *stream, const vec3 *pos, float volume, float pitch, int flags, int id) : uniquePtr(pos), decoder(NULL), volume(volume), volumeTarget(volume), volumeDelta(0.0f), pitch(pitch), flags(flags), id(id)
         {
+        #ifdef OL_ARNE
+            hwCh = -1; hwTried = false; hwBuf = NULL;
+        #endif
             this->pos = pos ? *pos : vec3(0.0f);
 
         #ifndef NO_SOUND
@@ -1019,6 +1044,9 @@ namespace Sound {
 
         ~Sample()
         {
+        #ifdef OL_ARNE
+            if (hwCh >= 0) Arne::stop(hwCh);
+        #endif
             delete decoder;
         }
 
@@ -1161,6 +1189,10 @@ namespace Sound {
 
         void replay()
         {
+        #ifdef OL_ARNE
+            if (hwCh >= 0) { Arne::stop(hwCh); hwCh = -1; }   // restarted on another channel by the next pass
+            hwTried = false;
+        #endif
             decoder->replay();
         }
 
@@ -1225,6 +1257,9 @@ namespace Sound {
             if (music != ((channels[i]->flags & MUSIC) != 0)) {
                 continue;
             }
+        #ifdef OL_ARNE
+            if (channels[i]->hwCh >= 0) continue;    // playing on an Arne channel
+        #endif
 
             if (channels[i]->flags & (FLIPPED | UNFLIPPED)) {
                 if (!(channels[i]->flags & (flipped ? FLIPPED : UNFLIPPED))) {
@@ -1273,6 +1308,62 @@ namespace Sound {
         }
     }
 
+#ifdef OL_ARNE
+    // the left/right volume Arne should play a sample at: as Sample::render works it out (volume x
+    // the sound setting x pan, linear on the V4), 0 while paused
+    uint16 arneVolume(Sample *s)
+    {
+        if (s->isPaused) return 0;
+        float v = s->volume * (Core::settings.audio.sound / float(SND_MAX_VOLUME));
+        vec2 pan = s->getPan();
+        return Arne::volume(pan.x * v, pan.y * v);
+    }
+
+    // Once per mixer pass (23 ms): effects that started get a channel if one is free (else they are
+    // mixed in software as before), the others get their volume, pitch and fades; a one-shot that
+    // ended stops its sample. count = the pass's frames at 44.1 kHz (fades are set per frame).
+    void arneUpdate(int count)
+    {
+        // a channel stopped since the last pass began (here or from the main thread, maybe a moment
+        // ago) waits for the next pass, 23 ms on: restarted sooner, Arne resumes its old sound
+        Arne::blocked = Arne::cooling;
+        Arne::cooling = 0;
+        if (!Arne::enabled) return;
+        for (int i = 0; i < channelsCount; i++)
+        {
+            Sample *s = channels[i];
+            if (s->flags & MUSIC) continue;
+            if (s->hwCh < 0) {
+                if (s->hwTried || !s->isPlaying || !s->decoder) continue;
+                s->hwTried = true;
+                const uint8 *src; int bytes, bits, rate;
+                if (!s->decoder->hwSource(src, bytes, bits, rate)) continue;
+                const Arne::Buf *b = Arne::get(src, bytes, bits, rate);
+                if (!b) continue;
+                int n = Arne::alloc();
+                if (n < 0) continue;
+                s->hwCh = n; s->hwBuf = b;
+                Arne::start(n, b->data, b->frames, (s->flags & LOOP) != 0, arneVolume(s), Arne::period(b->freq, s->pitch));
+                continue;
+            }
+            const int n = s->hwCh;
+            if (s->isPlaying && !(s->flags & LOOP) && !Arne::playing(n))
+                s->isPlaying = false;            // the one-shot has ended
+            if (s->isPlaying && s->volumeDelta != 0.0f) {
+                s->volume += s->volumeDelta * float(count);
+                if ((s->volumeDelta < 0.0f && s->volume < s->volumeTarget) || (s->volumeDelta > 0.0f && s->volume > s->volumeTarget)) {
+                    s->volume = s->volumeTarget;
+                    s->volumeDelta = 0.0f;
+                    if (s->stopAfterFade) s->isPlaying = false;
+                }
+            }
+            if (!s->isPlaying) { Arne::stop(n); s->hwCh = -1; continue; }
+            Arne::setVolume(n, arneVolume(s));
+            Arne::setPeriod(n, Arne::period(s->hwBuf->freq, s->pitch));
+        }
+    }
+#endif
+
     void convFrames(FrameHI *from, Frame *to, int count)
     {
         for (int i = 0; i < count; i++)
@@ -1286,6 +1377,9 @@ namespace Sound {
     {
         OS_LOCK(lock);
         PROFILE_CPU_TIMING(stats.mixer);
+    #ifdef OL_ARNE
+        arneUpdate(count);
+    #endif
 
         if (!channelsCount) {
             if (result && (Core::settings.audio.music != 0 || Core::settings.audio.sound != 0)) {
@@ -1483,6 +1577,9 @@ namespace Sound {
             delete channels[i];
         }
         channelsCount = 0;
+    #ifdef OL_ARNE
+        Arne::flush();                   // the level's converted sounds (every channel is stopped now)
+    #endif
     }
 }
 
