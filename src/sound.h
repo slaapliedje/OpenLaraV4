@@ -366,6 +366,76 @@ namespace Sound {
         }
     };
 
+    // AIFF, 16-bit PCM (the music on the V4): the whole file is read into RAM when the track starts,
+    // then played from memory - no decoding, and on a big-endian machine not even a byte swap.
+    // 22050 / 11025 Hz are stretched to 44.1 kHz like the PCM sounds.
+    struct AIFF : Decoder {
+        uint8       *mem;                // the file
+        const uint8 *data;               // first sample frame
+        int          frames, pos;
+
+        // mem: the whole file (owned); data / frames / ch / rate from its COMM and SSND chunks
+        AIFF(Stream *stream, uint8 *mem, const uint8 *data, int frames, int ch, int rate)
+            : Decoder(stream, ch, rate), mem(mem), data(data), frames(frames), pos(0) {}
+
+        virtual ~AIFF() { delete[] mem; }
+
+        virtual int decode(Frame *out, int count) {
+            int done = 0;
+            const int step = channels * 2;
+            const uint8 *p = data + pos * step;
+            while (done < count && pos < frames) {
+                Frame f;
+                f.L = int16((p[0] << 8) | p[1]);
+                f.R = channels == 2 ? int16((p[2] << 8) | p[3]) : f.L;
+                p += step; pos++;
+                done += resample(out + done, f);
+            }
+            return done;
+        }
+
+        virtual void replay() { pos = 0; }
+
+        // the file in memory -> a decoder, or NULL if it is not 16-bit PCM at 44100 / 22050 / 11025 Hz
+        static AIFF* open(Stream *stream) {
+            if (stream->size < 54) return NULL;
+            uint8 *mem = new uint8[stream->size];
+            stream->setPos(0);
+            stream->raw(mem, stream->size);
+            #define AIFF_BE32(q) ((uint32(q[0]) << 24) | (uint32(q[1]) << 16) | (uint32(q[2]) << 8) | uint32(q[3]))
+            int ch = 0, bits = 0, rate = 0;
+            uint32 nFrames = 0;
+            const uint8 *ssnd = NULL;
+            uint32 ssndLen = 0;
+            const uint8 *p = mem + 12, *end = mem + stream->size;
+            if (memcmp(mem, "FORM", 4) || memcmp(mem + 8, "AIFF", 4)) { delete[] mem; return NULL; }
+            while (p + 8 <= end) {
+                uint32 len = AIFF_BE32((p + 4));
+                const uint8 *body = p + 8;
+                if (body + len > end) len = uint32(end - body);
+                if (!memcmp(p, "COMM", 4) && len >= 18) {
+                    ch = (body[0] << 8) | body[1];
+                    nFrames = AIFF_BE32((body + 2));
+                    bits = (body[6] << 8) | body[7];
+                    // sample rate: 80-bit extended float, exponent 16383-biased, explicit integer bit
+                    int e = ((body[8] & 0x7F) << 8 | body[9]) - 16383;
+                    uint32 m = AIFF_BE32((body + 10));
+                    rate = (e >= 0 && e < 32) ? int(m >> (31 - e)) : 0;
+                } else if (!memcmp(p, "SSND", 4) && len >= 8) {
+                    uint32 offset = AIFF_BE32(body);
+                    ssnd = body + 8 + offset;
+                    ssndLen = len - 8 - offset;
+                }
+                p = body + len + (len & 1);
+            }
+            #undef AIFF_BE32
+            if (!ssnd || bits != 16 || ch < 1 || ch > 2 || (rate != 44100 && rate != 22050 && rate != 11025)) { delete[] mem; return NULL; }
+            uint32 avail = ssndLen / uint32(ch * 2);
+            if (nFrames > avail) nFrames = avail;
+            return new AIFF(stream, mem, ssnd, int(nFrames), ch, rate);
+        }
+    };
+
 #ifdef DECODE_ADPCM
     struct ADPCM : Decoder // https://wiki.multimedia.cx/?title=Microsoft_ADPCM
     {
@@ -1014,6 +1084,8 @@ namespace Sound {
                         stream->seek(size);
                     }
                 }
+            } else if (fourcc == FOURCC("FORM")) { // aiff, 16-bit PCM: read into memory, played from there
+                decoder = AIFF::open(stream);
             } else if (fourcc == FOURCC("OggS")) { // ogg
                 stream->seek(-4);
                 #ifdef DECODE_OGG

@@ -1193,7 +1193,7 @@ namespace TR {
     }
 
     bool checkTrack(const char *pre, char *name) {
-        static const char *fmt[] = { ".ogg", ".mp3", ".wav" };
+        static const char *fmt[] = { ".aiff", ".ogg", ".mp3", ".wav" };   // AIFF first: 16-bit PCM, no decoding
         const char *lng[] = { "", "", LANG_PREFIXES };
 
         int start = 1;
