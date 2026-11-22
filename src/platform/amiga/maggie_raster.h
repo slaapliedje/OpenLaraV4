@@ -267,6 +267,7 @@
                     if (LIGHT_PLANE) Mag::lightStep(dlx / 32768);     // towards zero: a span's light stays between its ends
                 }
                 int32 offset = lineOffset + xs;
+                MAG_COUNT(13, 1);
                 MAG_COUNT(5, (dv < 0 ? -dv : dv) > (du < 0 ? -du : du) ? len : 0);     // pixels of spans that run along v
                 Mag::spanSteps(swColor + offset, len, int32(uRow + uint32(xs) * uint32(du)), int32(vRow + uint32(xs) * uint32(dv)),
                                l, offset, ZS ? (zRow + uint32(xs) * uint32(dz)) << 1 : 0, ZS);
@@ -293,6 +294,7 @@
 
     // One line cut into exact affine pieces (the general case).
     __attribute__((noinline)) void magPerspLine(const MagPersp &P, int32 y, int32 xs, int32 len, int32 offset, int32 l, int32 dl, uint32 z, int32 dz2) {
+        MAG_COUNT(11, 1); MAG_COUNT(15, len);
         float fy = float(y - P.y0);
         float fxs = float(xs - P.X0);
         float q0 = P.q0 + fy * P.qdy + fxs * P.qdx, u0 = P.uq0 + fy * P.udy + fxs * P.udx, v0 = P.vq0 + fy * P.vdy + fxs * P.vdx;
@@ -322,6 +324,7 @@
                 r = 1.0f / (q0 + qS);
                 u0 += uS; v0 += vS; q0 += qS;
                 int32 iub = magInt(u0 * r), ivb = magInt(v0 * r);
+                MAG_COUNT(14, 1);
                 Mag::span(swColor + offset, S, iua, iva, (iub - iua) >> sh, (ivb - iva) >> sh, l, dl, offset, z, dz2);
                 l += dl << sh; z += uint32(dz2) << sh; offset += S; len -= S;
                 iua = iub; iva = ivb;
@@ -477,6 +480,7 @@
                             // from the edge (xL) to pixel xs's centre, 28.4 pixels: whole pixels, then 1/16ths
                             int32 fr = ((xa << 4) + 8) - (xL >> 12);
                             int32 di = xs - xa;
+                            MAG_COUNT(12, 1);
                             Mag::span(swColor + offset, len, u + du * di + (du >> 4) * fr, v + dv * di + (dv >> 4) * fr,
                                       du, dv, l, dl, offset, (zRow + uint32(xs) * uint32(dz)) << 1, dz2);
                         }

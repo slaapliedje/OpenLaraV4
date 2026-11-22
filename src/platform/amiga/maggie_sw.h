@@ -154,7 +154,7 @@ namespace Mag {
     // Time the same off-screen frames at each stage: the differences are the stage costs.
 #ifdef OL_PROFILE
     int      dbg = 0;
-    unsigned cnt[12];            // polygons, corners, drawn, spans, pixels; 8 room-colour faces, 9 general faces, 10 lights computed, 11 lit corners
+    unsigned cnt[16];            // polygons, corners, drawn, spans, pixels; 8 room-colour faces, 9 general faces, 10 lights computed, 11 lit corners
     #define MAG_STAGE(n)   (Mag::dbg == (n))
     #define MAG_COUNT(i, n) (Mag::cnt[i] += (n))
 #else
