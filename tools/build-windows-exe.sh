@@ -4,7 +4,7 @@
 # One-time setup of the build prefix (Windows Python 3.12 + PyInstaller):
 #   export WINEPREFIX=~/dev/toolchains/wine-pybuild WINEARCH=win64
 #   wineboot -i; wine python-3.12.8-amd64.exe /quiet InstallAllUsers=0 PrependPath=1 TargetDir='C:\Python312'
-#   wine 'C:\Python312\python.exe' -m pip install pyinstaller
+#   wine 'C:\Python312\python.exe' -m pip install pyinstaller numpy   (numpy: better music resampling)
 set -e
 cd "$(dirname "$0")"
 export WINEPREFIX=${WINEPREFIX:-$HOME/dev/toolchains/wine-pybuild} WINEDEBUG=-all

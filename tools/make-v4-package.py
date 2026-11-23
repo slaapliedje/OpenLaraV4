@@ -450,7 +450,7 @@ def add_openlara(out, bindir):
         shutil.copy2(need(os.path.join('launcher', 'OpenLaraLaunch')), os.path.join(out, name))
         shutil.copy2(need(os.path.join('installer', 'icons', 'OpenLara.info')), os.path.join(out, name + '.info'))
     shutil.copy2(need(os.path.join('installer', 'icons', 'Drawer.info')), out + '.info')
-    with open(os.path.join(out, 'ReadMe.txt'), 'w') as f:
+    with open(os.path.join(out, 'ReadMe.txt'), 'w', newline='\n') as f:   # LF: Amiga text
         f.write(README)
 
 
