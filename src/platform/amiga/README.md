@@ -24,6 +24,17 @@ Work in progress. Tested on a V4SA with core 12846 and CoffinOS r65, with the To
   plays), or Ogg.
 - Keyboard and the V4's USB joypad; the game pauses when another screen is in front.
 
+## Packaging your own game for a Vampire
+
+`tools/make-v4-package.py` builds a ready-to-copy package from your own Tomb Raider (PC) game: a CD
+image (`--cue`, your rip or the GOG / Steam release), a game folder with the music as files
+(`--cd DIR --audio DIR`), or a CD in a drive (`--drive /dev/sr0`, needs cdparanoia). It copies DATA and
+FMV, converts the CD music to 22 kHz AIFF, adds OpenLara, the launchers and icons, and writes the
+`OpenLaraMain` drawer, `OpenLaraV4.lha` and `OpenLaraV4.run`: a self-extracting Amiga program to put on
+an SD card and run on the Vampire (from the Shell: `OpenLaraV4.run [DESTINATION]`). Build the Amiga
+parts first: `./build.sh hw` and `installer/build.sh`. The package holds your game's files: it is for
+your own use.
+
 ## Building
 
 Needs bebbo's m68k-amigaos gcc 6.5 (`TC`, default `~/dev/toolchains/amigaos`) and its `vasmm68k_mot`.
