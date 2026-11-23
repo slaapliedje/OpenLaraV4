@@ -13,7 +13,7 @@ CXX=$TC/bin/m68k-amigaos-g++
 CC=$TC/bin/m68k-amigaos-gcc
 # -falign-*: the 68080 is sensitive to where hot loops sit (a 2-3 ms swing on LEVEL2 from unrelated edits); aligned, timings are stable
 FLAGS="-m68060 -mhard-float -O2 -fbbb=- -fomit-frame-pointer -falign-loops=16 -falign-jumps=16 -falign-functions=16 -falign-labels=8 -DNDEBUG -D__AMIGA__ ${EXTRA:-}"
-OUT=OpenLara; B=build
+OUT=${OUTNAME:-OpenLara}; B=${BUILDDIR:-build}
 for a in "$@"; do
   case $a in
     mag) FLAGS="$FLAGS -DOL_MAGGIE"; OUT=${OUT}Mag; B=${B}-mag ;;

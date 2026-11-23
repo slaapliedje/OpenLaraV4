@@ -519,6 +519,10 @@ __attribute__((noinline)) static int olMain()
     // the game loop never waits: above priority 0 it starves the network stack, sshd and rsh
     // (Workbench/some shells start programs at 1), so run at 0 and share the CPU with them
     SetTaskPri(FindTask(NULL), 0);
+    {                                    // ENV:OLPRI: another priority (benchmarks, away from busy background tasks)
+        char p[8];
+        if (GetVar((STRPTR)"OLPRI", (STRPTR)p, sizeof(p), 0) > 0) SetTaskPri(FindTask(NULL), atoi(p));
+    }
 
     {
         char res[16];
