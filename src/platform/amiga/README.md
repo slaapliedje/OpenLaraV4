@@ -35,6 +35,11 @@ an SD card and run on the Vampire (from the Shell: `OpenLaraV4.run [DESTINATION]
 parts first: `./build.sh hw` and `installer/build.sh`. The package holds your game's files: it is for
 your own use.
 
+Or on the Amiga itself: `tools/make-amiga-release.sh` builds `OpenLaraV4.lha` (no game data: the
+program, launchers, icons, a ReadMe with where to buy the game, and `MakeGameData`). Copy your CD image
+(the .cue and its files: GOG's and Steam's releases come that way) into the unpacked drawer and run
+MakeGameData: it writes DATA, FMV and the music there (about 6 minutes on a V4SA).
+
 ## Building
 
 Needs bebbo's m68k-amigaos gcc 6.5 (`TC`, default `~/dev/toolchains/amigaos`) and its `vasmm68k_mot`.
